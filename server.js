@@ -8,13 +8,10 @@ const port = process.env.PORT || 3001;
 
 // Database connection pool
 const pool = new Pool({
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  host: process.env.DB_HOST,
-  port: process.env.DB_PORT || 5432,
-  database: process.env.DB_NAME,
+  connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
-});// Middleware
+});
+
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 
@@ -25,7 +22,7 @@ pool.query(`
     user_id VARCHAR(255),
     first_name VARCHAR(255),
     last_name VARCHAR(255),
-    phone VARCHAR(20),
+    phone VARCHAR(255),
     email VARCHAR(255),
     telegram VARCHAR(255),
     age INT,
@@ -50,67 +47,47 @@ app.post('/api/archive', async (req, res) => {
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
       RETURNING *
     `;
-
-    const result = await pool.query(query, [
-      userId, firstName, lastName, phone, email, telegram, age, libidonLevel, photo, 
-      JSON.stringify(testData), JSON.stringify(testResult)
-    ]);
-
-    res.status(201).json({ success: true, data: result.rows[0] });
+    const values = [userId, firstName, lastName, phone, email, telegram, age, libidonLevel, photo, JSON.stringify(testData), JSON.stringify(testResult)];
+    
+    const result = await pool.query(query, values);
+    res.json({ success: true, data: result.rows[0] });
   } catch (error) {
-    console.error('❌ Error saving archive:', error);
-    res.status(500).json({ error: 'Failed to save archive' });
+    console.error('Error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// GET - Get all archive data
-app.get('/api/archive', async (req, res) => {
-  try {
-    const { libidonLevel } = req.query;
-    let query = 'SELECT * FROM archive';
-    const params = [];
-
-    if (libidonLevel) {
-      query += ' WHERE libido_level = $1';
-      params.push(libidonLevel);
-    }
-
-    query += ' ORDER BY created_at DESC';
-    const result = await pool.query(query, params);
-    res.json(result.rows);
-  } catch (error) {
-    console.error('❌ Error fetching archive:', error);
-    res.status(500).json({ error: 'Failed to fetch archive' });
-  }
-});
-
-// GET - Get by userId
+// GET - Get archive by user ID
 app.get('/api/archive/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
-    const result = await pool.query('SELECT * FROM archive WHERE user_id = $1', [userId]);
+    const query = 'SELECT * FROM archive WHERE user_id = $1';
+    const result = await pool.query(query, [userId]);
     res.json(result.rows);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch archive' });
+    console.error('Error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// DELETE - Delete archive data
-app.delete('/api/archive/:userId', async (req, res) => {
+// GET - Search archive by libido level
+app.get('/api/archive/filter/:libidonLevel', async (req, res) => {
   try {
-    const { userId } = req.params;
-    await pool.query('DELETE FROM archive WHERE user_id = $1', [userId]);
-    res.json({ success: true, message: '✅ Data deleted' });
+    const { libidonLevel } = req.params;
+    const query = 'SELECT * FROM archive WHERE libido_level = $1';
+    const result = await pool.query(query, [libidonLevel]);
+    res.json(result.rows);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to delete' });
+    console.error('Error:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// Health check
+// Health check endpoint
 app.get('/api/health', (req, res) => {
-  res.json({ status: '✅ Server is running' });
+  res.json({ status: 'ok' });
 });
 
 app.listen(port, () => {
-  console.log(`✅ Server running on port ${port}`);
+  console.log(`Tatiana-Server app listening on port ${port}`);
 });
