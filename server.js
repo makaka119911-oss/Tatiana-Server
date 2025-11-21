@@ -1,18 +1,20 @@
-// ultra-simple-server.js
 const express = require('express');
+const cors = require('cors');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS for all routes
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  next();
-});
+// CORS configuration
+app.use(cors({
+  origin: ['https://makaka119911-oss.github.io', 'http://localhost:3000', 'http://127.0.0.1:3000'],
+  credentials: true,
+  methods: ['GET', 'POST'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
 app.use(express.json());
 
-// Simple health check
+// Health endpoint
 app.get('/api/health', (req, res) => {
   console.log('✅ Health check received');
   res.json({ 
@@ -36,12 +38,36 @@ app.get('/api/test', (req, res) => {
 app.post('/api/register', (req, res) => {
   console.log('📝 Registration:', req.body);
   
-  // Здесь можно добавить отправку в Telegram
-  res.json({ 
-    success: true, 
-    message: 'Received registration data',
-    registrationId: 'T' + Date.now()
-  });
+  try {
+    const { lastName, firstName, age, phone, telegram } = req.body;
+
+    if (!lastName || !firstName || !age || !phone || !telegram) {
+      return res.status(400).json({
+        success: false,
+        error: 'Все поля обязательны'
+      });
+    }
+
+    const registrationId = 'T' + Date.now();
+    
+    console.log('✅ Registration processed:', registrationId);
+
+    // Здесь будет отправка в Telegram
+    // await sendToTelegram(...);
+
+    res.json({
+      success: true,
+      registrationId: registrationId,
+      message: 'Регистрация успешна!'
+    });
+
+  } catch (error) {
+    console.error('❌ Registration error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Ошибка сервера: ' + error.message
+    });
+  }
 });
 
 // Archive endpoint
@@ -123,7 +149,7 @@ app.all('*', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Ultra-simple server running on port ${PORT}`);
+  console.log(`🚀 Server running on port ${PORT}`);
   console.log(`📍 Endpoints available:`);
   console.log(`   GET  /api/health`);
   console.log(`   GET  /api/test`); 
