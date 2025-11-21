@@ -5,24 +5,35 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL connection
+// PostgreSQL connection - Railway automatically provides DATABASE_URL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
 // Test database connection
-pool.on('connect', () => {
-  console.log('✅ Connected to PostgreSQL database');
-});
-
-pool.on('error', (err) => {
-  console.error('❌ Database connection error:', err);
-});
+async function testConnection() {
+  try {
+    const client = await pool.connect();
+    console.log('✅ Connected to PostgreSQL database');
+    
+    // Test query
+    const result = await client.query('SELECT version()');
+    console.log('📊 PostgreSQL version:', result.rows[0].version);
+    
+    client.release();
+    return true;
+  } catch (error) {
+    console.error('❌ Database connection failed:', error.message);
+    return false;
+  }
+}
 
 // Initialize database tables
 async function initializeDatabase() {
   try {
+    console.log('🔄 Initializing database tables...');
+    
     // Create registrations table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS registrations (
@@ -41,16 +52,24 @@ async function initializeDatabase() {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS test_results (
         id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(50) REFERENCES registrations(registration_id),
+        registration_id VARCHAR(50) NOT NULL,
         test_type VARCHAR(50) NOT NULL,
         libido_level VARCHAR(100) NOT NULL,
         score INTEGER NOT NULL,
         test_data JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (registration_id) REFERENCES registrations(registration_id)
       )
     `);
 
-    console.log('✅ Database tables initialized');
+    console.log('✅ Database tables initialized successfully');
+    
+    // Check if we have any data
+    const regCount = await pool.query('SELECT COUNT(*) FROM registrations');
+    const testCount = await pool.query('SELECT COUNT(*) FROM test_results');
+    
+    console.log(`📊 Current data: ${regCount.rows[0].count} registrations, ${testCount.rows[0].count} test results`);
+    
   } catch (error) {
     console.error('❌ Database initialization error:', error);
   }
@@ -67,14 +86,28 @@ app.use(cors({
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Health endpoint
-app.get('/api/health', (req, res) => {
+// Health endpoint with DB check
+app.get('/api/health', async (req, res) => {
   console.log('✅ Health check received');
-  res.json({ 
-    status: 'ok', 
-    message: 'Server is running!',
-    timestamp: new Date().toISOString()
-  });
+  
+  try {
+    const dbConnected = await testConnection();
+    
+    res.json({ 
+      status: 'ok', 
+      message: 'Server is running!',
+      database: dbConnected ? 'connected' : 'disconnected',
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.json({
+      status: 'warning',
+      message: 'Server running but database issues',
+      database: 'error',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
 // Registration endpoint - SAVES TO DATABASE
@@ -93,6 +126,8 @@ app.post('/api/register', async (req, res) => {
     }
 
     const registrationId = 'REG_' + Date.now();
+    
+    console.log('💾 Saving registration to database...');
     
     // Save to database
     const result = await pool.query(
@@ -142,6 +177,8 @@ app.post('/api/test-result', async (req, res) => {
       });
     }
 
+    console.log('💾 Saving test result to database...');
+
     // Save to database
     const result = await pool.query(
       `INSERT INTO test_results (registration_id, test_type, libido_level, score, test_data) 
@@ -173,7 +210,7 @@ app.post('/api/test-result', async (req, res) => {
   }
 });
 
-// Archive endpoint - RETRIEVES FROM DATABASE
+// Archive endpoint - RETRIEVES REAL DATA FROM DATABASE
 app.get('/api/archive', async (req, res) => {
   console.log('📁 Archive access request');
   
@@ -221,6 +258,8 @@ app.get('/api/archive', async (req, res) => {
 // Function to get archive data from database
 async function getArchiveData() {
   try {
+    console.log('🔄 Fetching archive data from database...');
+    
     const result = await pool.query(`
       SELECT 
         r.registration_id,
@@ -239,6 +278,8 @@ async function getArchiveData() {
       ORDER BY r.created_at DESC
     `);
 
+    console.log(`📨 Found ${result.rows.length} records in database`);
+    
     return result.rows.map(row => ({
       fio: `${row.last_name} ${row.first_name}`,
       age: row.age,
@@ -254,6 +295,42 @@ async function getArchiveData() {
     return [];
   }
 }
+
+// Debug endpoint to see all data
+app.get('/api/debug/data', async (req, res) => {
+  try {
+    console.log('🔍 Debug data request');
+    
+    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC');
+    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC');
+    
+    const data = {
+      registrations: registrations.rows,
+      testResults: testResults.rows,
+      counts: {
+        registrations: registrations.rows.length,
+        testResults: testResults.rows.length
+      },
+      database: {
+        connected: true,
+        url: process.env.DATABASE_URL ? 'Set' : 'Not set'
+      }
+    };
+    
+    console.log(`📊 Debug data: ${data.counts.registrations} reg, ${data.counts.testResults} tests`);
+    
+    res.json(data);
+  } catch (error) {
+    console.error('Debug error:', error);
+    res.status(500).json({ 
+      error: error.message,
+      database: {
+        connected: false,
+        url: process.env.DATABASE_URL ? 'Set' : 'Not set'
+      }
+    });
+  }
+});
 
 // Telegram functions
 async function sendRegistrationToTelegram(data) {
@@ -332,30 +409,9 @@ async function sendTestResultToTelegram(data) {
   }
 }
 
-// Debug endpoint to see all data
-app.get('/api/debug/data', async (req, res) => {
-  try {
-    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC');
-    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC');
-    
-    res.json({
-      registrations: registrations.rows,
-      testResults: testResults.rows,
-      counts: {
-        registrations: registrations.rows.length,
-        testResults: testResults.rows.length
-      }
-    });
-  } catch (error) {
-    console.error('Debug error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Catch-all for debugging
 app.all('*', (req, res) => {
   console.log('📨 Request received:', req.method, req.url);
-  console.log('📦 Body:', req.body);
   
   res.json({ 
     method: req.method,
@@ -366,9 +422,23 @@ app.all('*', (req, res) => {
 });
 
 // Initialize database and start server
-initializeDatabase().then(() => {
+async function startServer() {
+  console.log('🚀 Starting Tatiana Server...');
+  console.log('📊 Environment:', process.env.NODE_ENV || 'development');
+  console.log('🔗 Database URL:', process.env.DATABASE_URL ? 'Set' : 'Not set');
+  
+  // Test database connection
+  const dbConnected = await testConnection();
+  
+  if (dbConnected) {
+    // Initialize tables
+    await initializeDatabase();
+  } else {
+    console.log('⚠️  Starting without database connection');
+  }
+
   app.listen(PORT, () => {
-    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`🎯 Server running on port ${PORT}`);
     console.log(`📍 Endpoints available:`);
     console.log(`   GET  /api/health`);
     console.log(`   POST /api/register`);
@@ -377,4 +447,6 @@ initializeDatabase().then(() => {
     console.log(`   GET  /api/debug/data`);
     console.log(`🔐 Archive password: tatiana_archive_2024_LBg_makaka_9f3a7c2e8d1b5a4c6`);
   });
-});
+}
+
+startServer().catch(console.error);
