@@ -1,8 +1,60 @@
 const express = require('express');
 const cors = require('cors');
+const { Pool } = require('pg');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// PostgreSQL connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
+
+// Test database connection
+pool.on('connect', () => {
+  console.log('✅ Connected to PostgreSQL database');
+});
+
+pool.on('error', (err) => {
+  console.error('❌ Database connection error:', err);
+});
+
+// Initialize database tables
+async function initializeDatabase() {
+  try {
+    // Create registrations table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS registrations (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(50) UNIQUE NOT NULL,
+        last_name VARCHAR(100) NOT NULL,
+        first_name VARCHAR(100) NOT NULL,
+        age INTEGER NOT NULL,
+        phone VARCHAR(20) NOT NULL,
+        telegram VARCHAR(100) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create test_results table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS test_results (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(50) REFERENCES registrations(registration_id),
+        test_type VARCHAR(50) NOT NULL,
+        libido_level VARCHAR(100) NOT NULL,
+        score INTEGER NOT NULL,
+        test_data JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('✅ Database tables initialized');
+  } catch (error) {
+    console.error('❌ Database initialization error:', error);
+  }
+}
 
 // CORS configuration
 app.use(cors({
@@ -25,17 +77,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// Test endpoint
-app.get('/api/test', (req, res) => {
-  console.log('✅ Test endpoint called');
-  res.json({ 
-    message: 'Test successful!',
-    data: { test: 'works' },
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Registration endpoint
+// Registration endpoint - SAVES TO DATABASE
 app.post('/api/register', async (req, res) => {
   console.log('📝 Registration request received:', req.body);
   
@@ -52,7 +94,14 @@ app.post('/api/register', async (req, res) => {
 
     const registrationId = 'REG_' + Date.now();
     
-    console.log('✅ Registration processed:', { registrationId, firstName, lastName });
+    // Save to database
+    const result = await pool.query(
+      `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram) 
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [registrationId, lastName, firstName, parseInt(age), phone, telegram]
+    );
+
+    console.log('✅ Registration saved to database:', registrationId);
 
     // Send to Telegram
     await sendRegistrationToTelegram({
@@ -79,7 +128,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Test results endpoint
+// Test results endpoint - SAVES TO DATABASE
 app.post('/api/test-result', async (req, res) => {
   console.log('📊 Test result received:', req.body);
   
@@ -93,7 +142,14 @@ app.post('/api/test-result', async (req, res) => {
       });
     }
 
-    console.log('✅ Test result processed:', { registrationId, level, score });
+    // Save to database
+    const result = await pool.query(
+      `INSERT INTO test_results (registration_id, test_type, libido_level, score, test_data) 
+       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
+      [registrationId, testData?.test_type || 'regular', level, score || 0, testData]
+    );
+
+    console.log('✅ Test result saved to database:', { registrationId, level, score });
 
     // Send to Telegram
     await sendTestResultToTelegram({
@@ -117,8 +173,8 @@ app.post('/api/test-result', async (req, res) => {
   }
 });
 
-// Archive endpoint - FIXED PASSWORD
-app.get('/api/archive', (req, res) => {
+// Archive endpoint - RETRIEVES FROM DATABASE
+app.get('/api/archive', async (req, res) => {
   console.log('📁 Archive access request');
   
   try {
@@ -132,11 +188,7 @@ app.get('/api/archive', (req, res) => {
     }
 
     const token = authHeader.replace('Bearer ', '');
-    
-    // CORRECT PASSWORD - matches archive.js
     const expectedToken = 'tatiana_archive_2024_LBg_makaka_9f3a7c2e8d1b5a4c6';
-
-    console.log('🔐 Token check:', { received: token, expected: expectedToken });
 
     if (token !== expectedToken) {
       return res.status(401).json({
@@ -145,35 +197,17 @@ app.get('/api/archive', (req, res) => {
       });
     }
 
-    // Mock archive data
-    const mockArchiveData = {
-      success: true,
-      records: [
-        {
-          fio: 'Иванов Иван',
-          age: 30,
-          phone: '+71234567890',
-          telegram: '@ivanov',
-          level: 'High libido',
-          score: 85,
-          date: new Date().toISOString()
-        },
-        {
-          fio: 'Петрова Мария', 
-          age: 28,
-          phone: '+71234567891',
-          telegram: '@petrova',
-          level: 'Medium libido',
-          score: 60,
-          date: new Date().toISOString()
-        }
-      ],
-      count: 2,
-      timestamp: new Date().toISOString()
-    };
+    // Get real data from database
+    const archiveData = await getArchiveData();
+    
+    console.log(`📊 Sending real archive data: ${archiveData.length} records`);
 
-    console.log('📊 Sending mock archive data');
-    res.json(mockArchiveData);
+    res.json({
+      success: true,
+      records: archiveData,
+      count: archiveData.length,
+      timestamp: new Date().toISOString()
+    });
 
   } catch (error) {
     console.error('❌ Archive error:', error);
@@ -183,6 +217,43 @@ app.get('/api/archive', (req, res) => {
     });
   }
 });
+
+// Function to get archive data from database
+async function getArchiveData() {
+  try {
+    const result = await pool.query(`
+      SELECT 
+        r.registration_id,
+        r.first_name,
+        r.last_name,
+        r.age,
+        r.phone,
+        r.telegram,
+        r.created_at as registered_at,
+        t.libido_level,
+        t.score,
+        t.created_at as tested_at
+      FROM registrations r
+      LEFT JOIN test_results t ON r.registration_id = t.registration_id
+      WHERE t.libido_level IS NOT NULL
+      ORDER BY r.created_at DESC
+    `);
+
+    return result.rows.map(row => ({
+      fio: `${row.last_name} ${row.first_name}`,
+      age: row.age,
+      phone: row.phone,
+      telegram: row.telegram,
+      level: row.libido_level,
+      score: row.score,
+      date: row.tested_at || row.registered_at,
+      registrationId: row.registration_id
+    }));
+  } catch (error) {
+    console.error('Error getting archive data:', error);
+    return [];
+  }
+}
 
 // Telegram functions
 async function sendRegistrationToTelegram(data) {
@@ -261,28 +332,49 @@ async function sendTestResultToTelegram(data) {
   }
 }
 
+// Debug endpoint to see all data
+app.get('/api/debug/data', async (req, res) => {
+  try {
+    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC');
+    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC');
+    
+    res.json({
+      registrations: registrations.rows,
+      testResults: testResults.rows,
+      counts: {
+        registrations: registrations.rows.length,
+        testResults: testResults.rows.length
+      }
+    });
+  } catch (error) {
+    console.error('Debug error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // Catch-all for debugging
 app.all('*', (req, res) => {
   console.log('📨 Request received:', req.method, req.url);
   console.log('📦 Body:', req.body);
-  console.log('🔑 Headers:', req.headers);
   
   res.json({ 
     method: req.method,
     path: req.path,
     query: req.query,
-    body: req.body,
     timestamp: new Date().toISOString()
   });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📍 Endpoints available:`);
-  console.log(`   GET  /api/health`);
-  console.log(`   GET  /api/test`); 
-  console.log(`   POST /api/register`);
-  console.log(`   POST /api/test-result`);
-  console.log(`   GET  /api/archive`);
-  console.log(`🔐 Archive password: tatiana_archive_2024_LBg_makaka_9f3a7c2e8d1b5a4c6`);
+// Initialize database and start server
+initializeDatabase().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📍 Endpoints available:`);
+    console.log(`   GET  /api/health`);
+    console.log(`   POST /api/register`);
+    console.log(`   POST /api/test-result`);
+    console.log(`   GET  /api/archive`);
+    console.log(`   GET  /api/debug/data`);
+    console.log(`🔐 Archive password: tatiana_archive_2024_LBg_makaka_9f3a7c2e8d1b5a4c6`);
+  });
 });
