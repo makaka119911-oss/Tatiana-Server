@@ -5,22 +5,39 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// PostgreSQL connection - Railway automatically provides DATABASE_URL
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
-});
+// In-memory storage as fallback
+const memoryStorage = {
+  registrations: [],
+  testResults: []
+};
+
+// PostgreSQL connection
+let pool;
+let dbConnected = false;
+
+try {
+  if (process.env.DATABASE_URL) {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false }
+    });
+    dbConnected = true;
+    console.log('✅ PostgreSQL pool created');
+  } else {
+    console.log('❌ DATABASE_URL not found, using memory storage');
+  }
+} catch (error) {
+  console.error('❌ Database connection failed:', error.message);
+  dbConnected = false;
+}
 
 // Test database connection
 async function testConnection() {
+  if (!pool) return false;
+  
   try {
     const client = await pool.connect();
     console.log('✅ Connected to PostgreSQL database');
-    
-    // Test query
-    const result = await client.query('SELECT version()');
-    console.log('📊 PostgreSQL version:', result.rows[0].version);
-    
     client.release();
     return true;
   } catch (error) {
@@ -31,10 +48,11 @@ async function testConnection() {
 
 // Initialize database tables
 async function initializeDatabase() {
+  if (!dbConnected) return;
+
   try {
     console.log('🔄 Initializing database tables...');
     
-    // Create registrations table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS registrations (
         id SERIAL PRIMARY KEY,
@@ -48,7 +66,6 @@ async function initializeDatabase() {
       )
     `);
 
-    // Create test_results table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS test_results (
         id SERIAL PRIMARY KEY,
@@ -57,22 +74,136 @@ async function initializeDatabase() {
         libido_level VARCHAR(100) NOT NULL,
         score INTEGER NOT NULL,
         test_data JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY (registration_id) REFERENCES registrations(registration_id)
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
 
-    console.log('✅ Database tables initialized successfully');
-    
-    // Check if we have any data
-    const regCount = await pool.query('SELECT COUNT(*) FROM registrations');
-    const testCount = await pool.query('SELECT COUNT(*) FROM test_results');
-    
-    console.log(`📊 Current data: ${regCount.rows[0].count} registrations, ${testCount.rows[0].count} test results`);
-    
+    console.log('✅ Database tables initialized');
   } catch (error) {
     console.error('❌ Database initialization error:', error);
+    dbConnected = false;
   }
+}
+
+// Save registration (with fallback)
+async function saveRegistration(data) {
+  const registrationId = 'REG_' + Date.now();
+  const registrationData = {
+    registration_id: registrationId,
+    last_name: data.lastName,
+    first_name: data.firstName,
+    age: parseInt(data.age),
+    phone: data.phone,
+    telegram: data.telegram,
+    created_at: new Date()
+  };
+
+  // Save to memory storage
+  memoryStorage.registrations.push(registrationData);
+
+  // Try to save to database
+  if (dbConnected) {
+    try {
+      await pool.query(
+        `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram) 
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [registrationId, data.lastName, data.firstName, parseInt(data.age), data.phone, data.telegram]
+      );
+      console.log('✅ Registration saved to database');
+    } catch (error) {
+      console.error('❌ Failed to save registration to database:', error.message);
+    }
+  }
+
+  return registrationId;
+}
+
+// Save test result (with fallback)
+async function saveTestResult(data) {
+  const testResult = {
+    registration_id: data.registrationId,
+    test_type: data.testData?.test_type || 'regular',
+    libido_level: data.level,
+    score: data.score || 0,
+    test_data: data.testData,
+    created_at: new Date()
+  };
+
+  // Save to memory storage
+  memoryStorage.testResults.push(testResult);
+
+  // Try to save to database
+  if (dbConnected) {
+    try {
+      await pool.query(
+        `INSERT INTO test_results (registration_id, test_type, libido_level, score, test_data) 
+         VALUES ($1, $2, $3, $4, $5)`,
+        [data.registrationId, data.testData?.test_type || 'regular', data.level, data.score || 0, data.testData]
+      );
+      console.log('✅ Test result saved to database');
+    } catch (error) {
+      console.error('❌ Failed to save test result to database:', error.message);
+    }
+  }
+}
+
+// Get archive data (with fallback)
+async function getArchiveData() {
+  // Try to get from database first
+  if (dbConnected) {
+    try {
+      const result = await pool.query(`
+        SELECT 
+          r.registration_id,
+          r.first_name,
+          r.last_name,
+          r.age,
+          r.phone,
+          r.telegram,
+          r.created_at as registered_at,
+          t.libido_level,
+          t.score,
+          t.created_at as tested_at
+        FROM registrations r
+        LEFT JOIN test_results t ON r.registration_id = t.registration_id
+        WHERE t.libido_level IS NOT NULL
+        ORDER BY r.created_at DESC
+      `);
+
+      console.log(`📊 Found ${result.rows.length} records in database`);
+      return result.rows.map(row => ({
+        fio: `${row.last_name} ${row.first_name}`,
+        age: row.age,
+        phone: row.phone,
+        telegram: row.telegram,
+        level: row.libido_level,
+        score: row.score,
+        date: row.tested_at || row.registered_at,
+        registrationId: row.registration_id
+      }));
+    } catch (error) {
+      console.error('❌ Error getting data from database:', error.message);
+    }
+  }
+
+  // Fallback to memory storage
+  console.log(`📊 Using memory storage: ${memoryStorage.registrations.length} registrations`);
+  
+  const archiveData = memoryStorage.registrations.map(reg => {
+    const testResult = memoryStorage.testResults.find(tr => tr.registration_id === reg.registration_id);
+    return {
+      fio: `${reg.last_name} ${reg.first_name}`,
+      age: reg.age,
+      phone: reg.phone,
+      telegram: reg.telegram,
+      level: testResult?.libido_level || 'Тест не пройден',
+      score: testResult?.score || 0,
+      date: testResult?.created_at || reg.created_at,
+      registrationId: reg.registration_id
+    };
+  }).filter(item => item.level !== 'Тест не пройден');
+
+  return archiveData;
 }
 
 // CORS configuration
@@ -84,68 +215,44 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Health endpoint with DB check
+// Health endpoint
 app.get('/api/health', async (req, res) => {
-  console.log('✅ Health check received');
+  const dbStatus = dbConnected ? 'connected' : 'disconnected';
+  const memoryCount = memoryStorage.registrations.length;
   
-  try {
-    const dbConnected = await testConnection();
-    
-    res.json({ 
-      status: 'ok', 
-      message: 'Server is running!',
-      database: dbConnected ? 'connected' : 'disconnected',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.json({
-      status: 'warning',
-      message: 'Server running but database issues',
-      database: 'error',
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
+  res.json({ 
+    status: 'ok', 
+    database: dbStatus,
+    memory_storage: {
+      registrations: memoryCount,
+      testResults: memoryStorage.testResults.length
+    },
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Registration endpoint - SAVES TO DATABASE
+// Registration endpoint
 app.post('/api/register', async (req, res) => {
-  console.log('📝 Registration request received:', req.body);
+  console.log('📝 Registration request:', req.body);
   
   try {
     const { lastName, firstName, age, phone, telegram } = req.body;
 
-    // Validation
     if (!lastName || !firstName || !age || !phone || !telegram) {
       return res.status(400).json({
         success: false,
-        error: 'Все поля обязательны для заполнения'
+        error: 'Все поля обязательны'
       });
     }
 
-    const registrationId = 'REG_' + Date.now();
-    
-    console.log('💾 Saving registration to database...');
-    
-    // Save to database
-    const result = await pool.query(
-      `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram) 
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [registrationId, lastName, firstName, parseInt(age), phone, telegram]
-    );
-
-    console.log('✅ Registration saved to database:', registrationId);
+    const registrationId = await saveRegistration({
+      lastName, firstName, age, phone, telegram
+    });
 
     // Send to Telegram
     await sendRegistrationToTelegram({
-      lastName,
-      firstName, 
-      age,
-      phone,
-      telegram,
-      registrationId
+      lastName, firstName, age, phone, telegram, registrationId
     });
 
     res.json({
@@ -163,7 +270,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Test results endpoint - SAVES TO DATABASE
+// Test results endpoint
 app.post('/api/test-result', async (req, res) => {
   console.log('📊 Test result received:', req.body);
   
@@ -177,23 +284,13 @@ app.post('/api/test-result', async (req, res) => {
       });
     }
 
-    console.log('💾 Saving test result to database...');
-
-    // Save to database
-    const result = await pool.query(
-      `INSERT INTO test_results (registration_id, test_type, libido_level, score, test_data) 
-       VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-      [registrationId, testData?.test_type || 'regular', level, score || 0, testData]
-    );
-
-    console.log('✅ Test result saved to database:', { registrationId, level, score });
+    await saveTestResult({
+      registrationId, level, score, testData
+    });
 
     // Send to Telegram
     await sendTestResultToTelegram({
-      registrationId,
-      level, 
-      score,
-      testData
+      registrationId, level, score, testData
     });
 
     res.json({
@@ -210,12 +307,11 @@ app.post('/api/test-result', async (req, res) => {
   }
 });
 
-// Archive endpoint - RETRIEVES REAL DATA FROM DATABASE
+// Archive endpoint
 app.get('/api/archive', async (req, res) => {
   console.log('📁 Archive access request');
   
   try {
-    // Check authorization
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
       return res.status(401).json({
@@ -234,15 +330,15 @@ app.get('/api/archive', async (req, res) => {
       });
     }
 
-    // Get real data from database
     const archiveData = await getArchiveData();
     
-    console.log(`📊 Sending real archive data: ${archiveData.length} records`);
+    console.log(`📊 Sending archive data: ${archiveData.length} records`);
 
     res.json({
       success: true,
       records: archiveData,
       count: archiveData.length,
+      storage: dbConnected ? 'database' : 'memory',
       timestamp: new Date().toISOString()
     });
 
@@ -255,84 +351,45 @@ app.get('/api/archive', async (req, res) => {
   }
 });
 
-// Function to get archive data from database
-async function getArchiveData() {
-  try {
-    console.log('🔄 Fetching archive data from database...');
-    
-    const result = await pool.query(`
-      SELECT 
-        r.registration_id,
-        r.first_name,
-        r.last_name,
-        r.age,
-        r.phone,
-        r.telegram,
-        r.created_at as registered_at,
-        t.libido_level,
-        t.score,
-        t.created_at as tested_at
-      FROM registrations r
-      LEFT JOIN test_results t ON r.registration_id = t.registration_id
-      WHERE t.libido_level IS NOT NULL
-      ORDER BY r.created_at DESC
-    `);
-
-    console.log(`📨 Found ${result.rows.length} records in database`);
-    
-    return result.rows.map(row => ({
-      fio: `${row.last_name} ${row.first_name}`,
-      age: row.age,
-      phone: row.phone,
-      telegram: row.telegram,
-      level: row.libido_level,
-      score: row.score,
-      date: row.tested_at || row.registered_at,
-      registrationId: row.registration_id
-    }));
-  } catch (error) {
-    console.error('Error getting archive data:', error);
-    return [];
-  }
-}
-
-// Debug endpoint to see all data
+// Debug endpoint
 app.get('/api/debug/data', async (req, res) => {
   try {
-    console.log('🔍 Debug data request');
-    
-    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC');
-    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC');
-    
-    const data = {
-      registrations: registrations.rows,
-      testResults: testResults.rows,
-      counts: {
-        registrations: registrations.rows.length,
-        testResults: testResults.rows.length
-      },
-      database: {
-        connected: true,
-        url: process.env.DATABASE_URL ? 'Set' : 'Not set'
+    let dbRegistrations = [];
+    let dbTestResults = [];
+
+    if (dbConnected) {
+      try {
+        dbRegistrations = (await pool.query('SELECT * FROM registrations ORDER BY created_at DESC')).rows;
+        dbTestResults = (await pool.query('SELECT * FROM test_results ORDER BY created_at DESC')).rows;
+      } catch (error) {
+        console.error('Error fetching from database:', error);
       }
-    };
-    
-    console.log(`📊 Debug data: ${data.counts.registrations} reg, ${data.counts.testResults} tests`);
-    
-    res.json(data);
-  } catch (error) {
-    console.error('Debug error:', error);
-    res.status(500).json({ 
-      error: error.message,
+    }
+
+    res.json({
       database: {
-        connected: false,
-        url: process.env.DATABASE_URL ? 'Set' : 'Not set'
+        connected: dbConnected,
+        registrations: dbRegistrations,
+        testResults: dbTestResults
+      },
+      memory: {
+        registrations: memoryStorage.registrations,
+        testResults: memoryStorage.testResults
+      },
+      counts: {
+        database_registrations: dbRegistrations.length,
+        database_testResults: dbTestResults.length,
+        memory_registrations: memoryStorage.registrations.length,
+        memory_testResults: memoryStorage.testResults.length
       }
     });
+  } catch (error) {
+    console.error('Debug error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Telegram functions
+// Telegram functions (оставить как было)
 async function sendRegistrationToTelegram(data) {
   try {
     const TELEGRAM_BOT_TOKEN = '8402206062:AAEJim1GkriKqY_o1mOo0YWSWQDdw5Qy2h0';
@@ -409,32 +466,17 @@ async function sendTestResultToTelegram(data) {
   }
 }
 
-// Catch-all for debugging
-app.all('*', (req, res) => {
-  console.log('📨 Request received:', req.method, req.url);
-  
-  res.json({ 
-    method: req.method,
-    path: req.path,
-    query: req.query,
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Initialize database and start server
+// Start server
 async function startServer() {
   console.log('🚀 Starting Tatiana Server...');
   console.log('📊 Environment:', process.env.NODE_ENV || 'development');
   console.log('🔗 Database URL:', process.env.DATABASE_URL ? 'Set' : 'Not set');
   
-  // Test database connection
-  const dbConnected = await testConnection();
-  
-  if (dbConnected) {
-    // Initialize tables
-    await initializeDatabase();
-  } else {
-    console.log('⚠️  Starting without database connection');
+  if (process.env.DATABASE_URL) {
+    dbConnected = await testConnection();
+    if (dbConnected) {
+      await initializeDatabase();
+    }
   }
 
   app.listen(PORT, () => {
@@ -446,6 +488,7 @@ async function startServer() {
     console.log(`   GET  /api/archive`);
     console.log(`   GET  /api/debug/data`);
     console.log(`🔐 Archive password: tatiana_archive_2024_LBg_makaka_9f3a7c2e8d1b5a4c6`);
+    console.log(`💾 Storage: ${dbConnected ? 'Database + Memory' : 'Memory only'}`);
   });
 }
 
