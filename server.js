@@ -1,22 +1,30 @@
 const express = require('express');
+const { Pool } = require('pg');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware для логирования всех запросов
-app.use((req, res, next) => {
-  console.log(`📨 ${req.method} ${req.path} - ${new Date().toISOString()}`);
-  next();
+console.log('🚀 Starting Tatiana Server...');
+
+// Простое подключение к БД
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
 });
 
-// КРИТИЧЕСКИ ВАЖНО: Health check ДОЛЖЕН быть первым!
+// Middleware для парсинга JSON
+app.use(express.json());
+
+// ============ HEALTH CHECKS ============
+// ОСНОВНОЙ HEALTH CHECK - должен быть ПЕРВЫМ
 app.get('/', (req, res) => {
-  console.log('✅ Health check received - responding with 200 OK');
+  console.log('✅ Root health check - 200 OK');
   res.status(200).set('Content-Type', 'text/plain').send('OK');
 });
 
-// Дополнительный health check endpoint
+// Дополнительный health check
 app.get('/health', (req, res) => {
-  console.log('✅ /health endpoint called');
+  console.log('✅ /health endpoint - 200 OK');
   res.status(200).json({ 
     status: 'ok',
     timestamp: new Date().toISOString(),
@@ -24,49 +32,91 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Простой тестовый endpoint
-app.get('/test', (req, res) => {
-  res.json({ message: 'Server is working!' });
+// Health check с проверкой БД
+app.get('/health/db', async (req, res) => {
+  try {
+    const client = await pool.connect();
+    const result = await client.query('SELECT NOW() as current_time');
+    client.release();
+    
+    res.status(200).json({
+      status: 'ok',
+      database: 'connected',
+      current_time: result.rows[0].current_time
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      database: 'disconnected',
+      error: error.message
+    });
+  }
 });
 
-// Запуск сервера с улучшенной обработкой
+// ============ API ENDPOINTS ============
+app.post('/api/register', async (req, res) => {
+  try {
+    const { lastName, firstName, age, phone, telegram } = req.body;
+    
+    // Валидация
+    if (!lastName || !firstName || !age || !phone || !telegram) {
+      return res.status(400).json({ success: false, error: 'Все поля обязательны' });
+    }
+
+    const registrationId = 'REG_' + Date.now();
+    
+    // Сохранение в БД
+    await pool.query(
+      `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram) 
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [registrationId, lastName, firstName, parseInt(age), phone, telegram]
+    );
+
+    console.log('✅ Registration saved:', registrationId);
+
+    res.json({ 
+      success: true, 
+      registrationId,
+      message: 'Регистрация успешно завершена!' 
+    });
+
+  } catch (error) {
+    console.error('❌ Registration error:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.get('/api/test', (req, res) => {
+  res.json({ message: 'API is working!' });
+});
+
+// Запуск сервера
 const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log('========================================');
-  console.log('🚀 SERVER STARTED SUCCESSFULLY');
-  console.log(`📍 Port: ${PORT}`);
-  console.log(`🌐 Local: http://0.0.0.0:${PORT}/`);
-  console.log(`✅ Health: http://0.0.0.0:${PORT}/`);
-  console.log(`🏥 Health API: http://0.0.0.0:${PORT}/health`);
-  console.log('========================================');
-  
-  // Дополнительная проверка что сервер действительно слушает
-  console.log('📡 Server is listening for requests...');
+  console.log('\n🎉 ===== SERVER STARTED SUCCESSFULLY =====');
+  console.log(`📍 Server: http://0.0.0.0:${PORT}`);
+  console.log(`🌐 Health: http://0.0.0.0:${PORT}/`);
+  console.log(`🏥 Health DB: http://0.0.0.0:${PORT}/health/db`);
+  console.log(`📝 Register: http://0.0.0.0:${PORT}/api/register`);
+  console.log('🎉 ====================================\n');
 });
 
-// Улучшенная обработка graceful shutdown
+// Graceful shutdown
 process.on('SIGTERM', () => {
   console.log('🛑 SIGTERM received - starting graceful shutdown');
-  console.log('🔍 Last health check was at:', new Date().toISOString());
-  
   server.close(() => {
-    console.log('✅ Server closed gracefully');
-    process.exit(0);
+    console.log('✅ Express server closed');
+    pool.end(() => {
+      console.log('✅ Database connections closed');
+      process.exit(0);
+    });
   });
-  
-  // Force close after 5 seconds
-  setTimeout(() => {
-    console.log('⚠️ Forcing shutdown after timeout');
-    process.exit(1);
-  }, 5000);
 });
 
 // Обработка ошибок
 process.on('uncaughtException', (error) => {
   console.error('🚨 UNCAUGHT EXCEPTION:', error);
-  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-  process.exit(1);
 });
