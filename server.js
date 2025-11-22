@@ -1,14 +1,70 @@
 const express = require('express');
+const { Pool } = require('pg');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting Tatiana Server...');
+console.log('🚀 Starting Tatiana Server with PostgreSQL...');
 
-// Basic middleware
-app.use(express.json());
+// Database connection
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// Test database connection
+const testDB = async () => {
+  try {
+    const client = await pool.connect();
+    const result = await client.query('SELECT NOW()');
+    client.release();
+    console.log('✅ Database connected:', result.rows[0].now);
+    return true;
+  } catch (error) {
+    console.error('❌ Database connection failed:', error.message);
+    return false;
+  }
+};
+
+// Initialize database
+const initDB = async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS registrations (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(255) UNIQUE NOT NULL,
+        last_name VARCHAR(255) NOT NULL,
+        first_name VARCHAR(255) NOT NULL,
+        age INTEGER NOT NULL,
+        phone VARCHAR(255) NOT NULL,
+        telegram VARCHAR(255) NOT NULL,
+        photo_base64 TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS test_results (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(255) REFERENCES registrations(registration_id),
+        test_data JSONB,
+        level VARCHAR(255),
+        score INTEGER,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('✅ Database tables ready');
+  } catch (error) {
+    console.error('❌ Database init error:', error);
+  }
+};
+
+// Middleware
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// CORS middleware
+// CORS
 app.use((req, res, next) => {
   const allowedOrigins = process.env.ALLOWED_ORIGINS ? 
     process.env.ALLOWED_ORIGINS.split(',') : 
@@ -29,24 +85,30 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check endpoint - ДОЛЖЕН БЫТЬ ПЕРВЫМ
+// Health check - SIMPLE TEXT RESPONSE (Railway requirement)
 app.get('/', (req, res) => {
-  console.log('✅ Health check received');
   res.status(200).set('Content-Type', 'text/plain').send('OK');
 });
 
-// Additional health endpoint
-app.get('/health', (req, res) => {
-  console.log('✅ Health endpoint called');
-  res.status(200).json({ 
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    service: 'Tatiana Server',
-    uptime: process.uptime()
-  });
+app.get('/health', async (req, res) => {
+  try {
+    const dbConnected = await testDB();
+    res.status(200).json({
+      status: 'ok',
+      database: dbConnected ? 'connected' : 'disconnected',
+      timestamp: new Date().toISOString(),
+      uptime: process.uptime()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
 });
 
-// Simple test endpoint
+// Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({ 
     success: true, 
@@ -55,10 +117,10 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Simple register endpoint
-app.post('/api/register', (req, res) => {
+// Register endpoint with DB
+app.post('/api/register', async (req, res) => {
   try {
-    const { lastName, firstName, age, phone, telegram } = req.body;
+    const { lastName, firstName, age, phone, telegram, photoBase64 } = req.body;
     
     console.log('📝 Registration received:', { lastName, firstName, age, phone, telegram });
 
@@ -70,8 +132,15 @@ app.post('/api/register', (req, res) => {
     }
 
     const registrationId = 'REG_' + Date.now();
-    
-    console.log('✅ Registration processed:', registrationId);
+
+    // Save to database
+    await pool.query(
+      `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram, photo_base64)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [registrationId, lastName, firstName, parseInt(age), phone, telegram, photoBase64 || null]
+    );
+
+    console.log('✅ Registration saved to DB:', registrationId);
 
     res.json({ 
       success: true, 
@@ -88,23 +157,92 @@ app.post('/api/register', (req, res) => {
   }
 });
 
-// Archive endpoint
-app.get('/api/archive', (req, res) => {
-  const token = req.headers.authorization?.replace('Bearer ', '');
-  
-  if (!token || token !== process.env.ARCHIVE_TOKEN) {
-    return res.status(401).json({ 
+// Test results endpoint
+app.post('/api/test-result', async (req, res) => {
+  try {
+    const { registrationId, testData, level, score } = req.body;
+
+    if (!registrationId) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Registration ID required' 
+      });
+    }
+
+    await pool.query(
+      `INSERT INTO test_results (registration_id, test_data, level, score)
+       VALUES ($1, $2, $3, $4)`,
+      [registrationId, testData, level, score]
+    );
+
+    console.log('✅ Test results saved for:', registrationId);
+
+    res.json({ 
+      success: true, 
+      message: 'Test results saved!' 
+    });
+
+  } catch (error) {
+    console.error('❌ Test result error:', error);
+    res.status(500).json({ 
       success: false, 
-      error: 'Неавторизованный доступ' 
+      error: 'Internal server error' 
     });
   }
+});
 
-  res.json({ 
-    success: true, 
-    records: [],
-    message: 'Архив работает в тестовом режиме',
-    count: 0
-  });
+// Archive endpoint
+app.get('/api/archive', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    
+    if (!token || token !== process.env.ARCHIVE_TOKEN) {
+      return res.status(401).json({ 
+        success: false, 
+        error: 'Неавторизованный доступ' 
+      });
+    }
+
+    const result = await pool.query(`
+      SELECT 
+        r.registration_id,
+        r.last_name,
+        r.first_name,
+        r.age,
+        r.phone,
+        r.telegram,
+        t.level,
+        t.score,
+        r.created_at as date
+      FROM registrations r
+      LEFT JOIN test_results t ON r.registration_id = t.registration_id
+      ORDER BY r.created_at DESC
+    `);
+
+    const records = result.rows.map(row => ({
+      registrationId: row.registration_id,
+      fio: `${row.last_name} ${row.first_name}`,
+      age: row.age,
+      phone: row.phone,
+      telegram: row.telegram,
+      level: row.level,
+      score: row.score,
+      date: row.date
+    }));
+
+    res.json({ 
+      success: true, 
+      records,
+      count: records.length 
+    });
+
+  } catch (error) {
+    console.error('❌ Archive error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Ошибка загрузки архива' 
+    });
+  }
 });
 
 // 404 handler
@@ -124,52 +262,38 @@ app.use((error, req, res, next) => {
   });
 });
 
-// Start server
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
-  console.log(`📍 Server running on port: ${PORT}`);
-  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📡 Health check: http://0.0.0.0:${PORT}/`);
-  console.log(`🏥 Health endpoint: http://0.0.0.0:${PORT}/health`);
-  console.log('🚀 Server is ready and stable!');
-  console.log('🎉 =================================\n');
-});
+// Start server with DB initialization
+const startServer = async () => {
+  try {
+    // Test DB connection
+    await testDB();
+    await initDB();
 
-// Server error handling
-server.on('error', (error) => {
-  console.error('🚨 Server error:', error);
-});
+    const server = app.listen(PORT, '0.0.0.0', () => {
+      console.log('\n🎉 ===== TATIANA SERVER WITH POSTGRESQL STARTED =====');
+      console.log(`📍 Server running on port: ${PORT}`);
+      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+      console.log(`🗄️ Database: Connected`);
+      console.log('🚀 Server is ready!');
+      console.log('🎉 =================================\n');
+    });
 
-// Handle graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received - starting graceful shutdown');
-  server.close(() => {
-    console.log('✅ Express server closed');
-    process.exit(0);
-  });
-  
-  // Force close after 5 seconds
-  setTimeout(() => {
-    console.log('⚠️ Forcing shutdown after timeout');
+    // Graceful shutdown
+    process.on('SIGTERM', () => {
+      console.log('🛑 SIGTERM received - starting graceful shutdown');
+      server.close(() => {
+        console.log('✅ Express server closed');
+        pool.end(() => {
+          console.log('✅ Database connections closed');
+          process.exit(0);
+        });
+      });
+    });
+
+  } catch (error) {
+    console.error('❌ Failed to start server:', error);
     process.exit(1);
-  }, 5000);
-});
+  }
+};
 
-process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received - starting graceful shutdown');
-  server.close(() => {
-    console.log('✅ Express server closed');
-    process.exit(0);
-  });
-});
-
-// Uncaught exception handling
-process.on('uncaughtException', (error) => {
-  console.error('🚨 UNCAUGHT EXCEPTION:', error);
-  process.exit(1);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-  process.exit(1);
-});
+startServer();
