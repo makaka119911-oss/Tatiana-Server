@@ -63,11 +63,29 @@ async function initializeDatabase() {
 }
 
 // Middleware
+// ============ CORS CONFIGURATION ============
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['https://makaka119911-oss.github.io'],
-  credentials: true
+  origin: function (origin, callback) {
+    const allowedOrigins = [
+      'https://makaka119911-oss.github.io',
+      'http://localhost:3000',
+      'https://makaka119911-oss.github.io/Tatiana'
+    ];
+    
+    // Разрешить запросы без origin (мобильные приложения и т.д.)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('Блокировано CORS:', origin);
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
-
 app.use(express.json());
 
 // ============ HEALTHCHECK ENDPOINTS ============
