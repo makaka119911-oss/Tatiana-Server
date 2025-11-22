@@ -9,7 +9,7 @@
     "startCommand": "npm start",
         "healthcheckPath": "/",
     "healthcheckTimeout": 60,
-    "healthcheckInterval": 30
+    "healthcheckInterval": 30,
   "plugins": [
     "postgres"
   ]
