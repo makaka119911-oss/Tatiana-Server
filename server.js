@@ -7,48 +7,32 @@ const PORT = process.env.PORT || 3000;
 
 console.log('🚀 Starting Tatiana Server...');
 
-// Простой пул соединений без сложных настроек
+// Простой пул соединений
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// Улучшенная CORS конфигурация
+// Упрощенная CORS конфигурация
 app.use(cors({
-  origin: function (origin, callback) {
-    const allowedOrigins = process.env.ALLOWED_ORIGINS ? 
-      process.env.ALLOWED_ORIGINS.split(',') : 
-      ['https://makaka119911-oss.github.io', 'http://localhost:3000'];
-    
-    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
-      callback(null, true);
-    } else {
-      console.log('🔒 CORS blocked for origin:', origin);
-      callback(new Error('Not allowed by CORS'));
-    }
-  },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
+  origin: ['https://makaka119911-oss.github.io', 'http://localhost:3000'],
+  credentials: true
 }));
 
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
 
-// Обработка OPTIONS запросов для CORS
-app.options('*', cors());
-
-// ============ HEALTHCHECK ENDPOINTS ============
-// ОЧЕНЬ ПРОСТОЙ health check для Railway (должен отвечать быстро)
+// ============ CRITICAL HEALTH CHECKS ============
+// Простейший health check для Railway (ДОЛЖЕН БЫТЬ ПЕРВЫМ!)
 app.get('/', (req, res) => {
-  res.json({ 
+  console.log('✅ Health check received');
+  res.status(200).json({ 
     status: 'ok', 
     service: 'Tatiana Server',
     timestamp: new Date().toISOString()
   });
 });
 
-// Простой health check
+// Альтернативный health check
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok',
@@ -56,25 +40,13 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API health check (более детальный)
-app.get('/api/health', async (req, res) => {
-  try {
-    // Быстрая проверка БД
-    const client = await pool.connect();
-    client.release();
-    
-    res.json({ 
-      status: 'ok', 
-      database: 'connected',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      status: 'error', 
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
+// Быстрый health check без БД
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    database: 'checking',
+    timestamp: new Date().toISOString()
+  });
 });
 
 // ============ API ROUTES ============
@@ -198,24 +170,6 @@ app.get('/api/archive', async (req, res) => {
   }
 });
 
-app.get('/api/debug/data', async (req, res) => {
-  try {
-    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC LIMIT 10');
-    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC LIMIT 10');
-    
-    res.json({
-      registrations: registrations.rows,
-      testResults: testResults.rows,
-      counts: {
-        registrations: registrations.rows.length,
-        testResults: testResults.rows.length
-      }
-    });
-  } catch (error) {
-    res.status(500).json({ error: error.message });
-  }
-});
-
 // Функция для отправки в Telegram
 async function sendToTelegram(type, data) {
   try {
@@ -263,42 +217,6 @@ async function sendToTelegram(type, data) {
   }
 }
 
-// Инициализация базы данных (асинхронно, не блокирует запуск)
-async function initializeDatabase() {
-  try {
-    console.log('🔄 Checking database tables...');
-    
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS registrations (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(50) UNIQUE NOT NULL,
-        last_name VARCHAR(100) NOT NULL,
-        first_name VARCHAR(100) NOT NULL,
-        age INTEGER NOT NULL,
-        phone VARCHAR(20) NOT NULL,
-        telegram VARCHAR(100) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS test_results (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(50) NOT NULL,
-        test_type VARCHAR(50) NOT NULL,
-        libido_level VARCHAR(100) NOT NULL,
-        score INTEGER NOT NULL,
-        test_data JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    console.log('✅ Database tables ready');
-  } catch (error) {
-    console.error('❌ Database initialization error:', error.message);
-  }
-}
-
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('🛑 SIGTERM received, starting graceful shutdown');
@@ -307,49 +225,25 @@ process.on('SIGTERM', async () => {
   process.exit(0);
 });
 
-process.on('SIGINT', async () => {
-  console.log('🛑 SIGINT received, starting graceful shutdown');
-  await pool.end();
-  console.log('✅ Database connections closed');
-  process.exit(0);
-});
-
-// Обработка ошибок
-process.on('uncaughtException', (error) => {
-  console.error('🚨 UNCAUGHT EXCEPTION:', error);
-});
-
-process.on('unhandledRejection', (reason, promise) => {
-  console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-});
-
 // Запуск сервера
-async function startServer() {
+function startServer() {
   try {
-    console.log('🔧 Initializing server...');
-    
-    // Запускаем сервер сразу
     const server = app.listen(PORT, '0.0.0.0', () => {
       console.log('\n🎯 SERVER STARTED SUCCESSFULLY');
       console.log('========================================');
       console.log(`📍 Server: http://0.0.0.0:${PORT}`);
-      console.log(`🌐 Health: http://0.0.0.0:${PORT}/health`);
+      console.log(`🌐 Health: http://0.0.0.0:${PORT}/`);
       console.log(`🌐 API Health: http://0.0.0.0:${PORT}/api/health`);
       console.log('========================================\n');
-      
-      // Инициализируем БД после запуска сервера
-      initializeDatabase().catch(console.error);
     });
 
-    // Настройки для Railway
-    server.keepAliveTimeout = 120000;
-    server.headersTimeout = 120000;
-
+    return server;
   } catch (error) {
     console.error('💥 FAILED TO START SERVER:', error);
     process.exit(1);
   }
 }
 
-// Запускаем сервер
-startServer();
+// Немедленный запуск сервера
+console.log('🔧 Starting server immediately...');
+const server = startServer();
