@@ -7,77 +7,11 @@ const PORT = process.env.PORT || 3000;
 
 console.log('🚀 Starting Tatiana Server...');
 
-// Улучшенная конфигурация PostgreSQL с обработкой ошибок
+// Простой пул соединений без сложных настроек
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
-  max: 5, // Ограничиваем соединения
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
+  ssl: { rejectUnauthorized: false }
 });
-
-// Тестирование подключения к БД с повторными попытками
-async function testConnection() {
-  let attempts = 0;
-  const maxAttempts = 3;
-  
-  while (attempts < maxAttempts) {
-    try {
-      const client = await pool.connect();
-      console.log('✅ Connected to PostgreSQL database');
-      client.release();
-      return true;
-    } catch (error) {
-      attempts++;
-      console.error(`❌ Database connection attempt ${attempts} failed:`, error.message);
-      
-      if (attempts < maxAttempts) {
-        console.log(`🔄 Retrying in 3 seconds...`);
-        await new Promise(resolve => setTimeout(resolve, 3000));
-      } else {
-        console.error('💥 All database connection attempts failed');
-        return false;
-      }
-    }
-  }
-}
-
-// Инициализация базы данных
-async function initializeDatabase() {
-  try {
-    console.log('🔄 Checking database tables...');
-    
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS registrations (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(50) UNIQUE NOT NULL,
-        last_name VARCHAR(100) NOT NULL,
-        first_name VARCHAR(100) NOT NULL,
-        age INTEGER NOT NULL,
-        phone VARCHAR(20) NOT NULL,
-        telegram VARCHAR(100) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS test_results (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(50) NOT NULL,
-        test_type VARCHAR(50) NOT NULL,
-        libido_level VARCHAR(100) NOT NULL,
-        score INTEGER NOT NULL,
-        test_data JSONB,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    console.log('✅ Database tables ready');
-  } catch (error) {
-    console.error('❌ Database initialization error:', error.message);
-    // Не прерываем выполнение - приложение может работать без некоторых таблиц
-  }
-}
 
 // Улучшенная CORS конфигурация
 app.use(cors({
@@ -86,10 +20,7 @@ app.use(cors({
       process.env.ALLOWED_ORIGINS.split(',') : 
       ['https://makaka119911-oss.github.io', 'http://localhost:3000'];
     
-    // Разрешить запросы без origin (мобильные приложения, curl и т.д.)
-    if (!origin) return callback(null, true);
-    
-    if (allowedOrigins.indexOf(origin) !== -1) {
+    if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       console.log('🔒 CORS blocked for origin:', origin);
@@ -108,17 +39,16 @@ app.use(express.urlencoded({ extended: true }));
 app.options('*', cors());
 
 // ============ HEALTHCHECK ENDPOINTS ============
-// Упрощенный health check для Railway
+// ОЧЕНЬ ПРОСТОЙ health check для Railway (должен отвечать быстро)
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'Tatiana Server',
-    timestamp: new Date().toISOString(),
-    environment: process.env.NODE_ENV || 'development'
+    timestamp: new Date().toISOString()
   });
 });
 
-// Health check endpoint для Railway
+// Простой health check
 app.get('/health', (req, res) => {
   res.status(200).json({ 
     status: 'ok',
@@ -126,13 +56,16 @@ app.get('/health', (req, res) => {
   });
 });
 
-// API health check с проверкой БД
+// API health check (более детальный)
 app.get('/api/health', async (req, res) => {
   try {
-    const dbConnected = await testConnection();
+    // Быстрая проверка БД
+    const client = await pool.connect();
+    client.release();
+    
     res.json({ 
       status: 'ok', 
-      database: dbConnected ? 'connected' : 'disconnected',
+      database: 'connected',
       timestamp: new Date().toISOString()
     });
   } catch (error) {
@@ -322,12 +255,47 @@ async function sendToTelegram(type, data) {
     if (response.ok) {
       console.log('✅ Message sent to Telegram');
     } else {
-      const errorText = await response.text();
-      console.error('❌ Telegram error:', errorText);
+      console.error('❌ Telegram error:', await response.text());
     }
 
   } catch (error) {
     console.error('❌ Telegram error:', error.message);
+  }
+}
+
+// Инициализация базы данных (асинхронно, не блокирует запуск)
+async function initializeDatabase() {
+  try {
+    console.log('🔄 Checking database tables...');
+    
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS registrations (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(50) UNIQUE NOT NULL,
+        last_name VARCHAR(100) NOT NULL,
+        first_name VARCHAR(100) NOT NULL,
+        age INTEGER NOT NULL,
+        phone VARCHAR(20) NOT NULL,
+        telegram VARCHAR(100) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS test_results (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(50) NOT NULL,
+        test_type VARCHAR(50) NOT NULL,
+        libido_level VARCHAR(100) NOT NULL,
+        score INTEGER NOT NULL,
+        test_data JSONB,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    console.log('✅ Database tables ready');
+  } catch (error) {
+    console.error('❌ Database initialization error:', error.message);
   }
 }
 
@@ -346,15 +314,13 @@ process.on('SIGINT', async () => {
   process.exit(0);
 });
 
-// Обработка неперехваченных ошибок
+// Обработка ошибок
 process.on('uncaughtException', (error) => {
   console.error('🚨 UNCAUGHT EXCEPTION:', error);
-  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
-  process.exit(1);
 });
 
 // Запуск сервера
@@ -362,30 +328,20 @@ async function startServer() {
   try {
     console.log('🔧 Initializing server...');
     
-    // Инициализация базы данных
-    await initializeDatabase();
-    
-    // Тестирование подключения
-    const dbConnected = await testConnection();
-    
-    if (!dbConnected) {
-      console.log('⚠️ Starting server without database connection');
-    }
-
+    // Запускаем сервер сразу
     const server = app.listen(PORT, '0.0.0.0', () => {
       console.log('\n🎯 SERVER STARTED SUCCESSFULLY');
       console.log('========================================');
       console.log(`📍 Server: http://0.0.0.0:${PORT}`);
       console.log(`🌐 Health: http://0.0.0.0:${PORT}/health`);
       console.log(`🌐 API Health: http://0.0.0.0:${PORT}/api/health`);
-      console.log(`📝 Register: http://0.0.0.0:${PORT}/api/register`);
-      console.log(`📊 Test result: http://0.0.0.0:${PORT}/api/test-result`);
-      console.log(`📁 Archive: http://0.0.0.0:${PORT}/api/archive`);
-      console.log(`🔍 Debug: http://0.0.0.0:${PORT}/api/debug/data`);
       console.log('========================================\n');
+      
+      // Инициализируем БД после запуска сервера
+      initializeDatabase().catch(console.error);
     });
 
-    // Health check для Railway
+    // Настройки для Railway
     server.keepAliveTimeout = 120000;
     server.headersTimeout = 120000;
 
@@ -395,4 +351,5 @@ async function startServer() {
   }
 }
 
+// Запускаем сервер
 startServer();
