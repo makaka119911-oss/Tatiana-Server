@@ -7,26 +7,42 @@ const PORT = process.env.PORT || 3000;
 
 console.log('🚀 Starting Tatiana Server...');
 
-// PostgreSQL connection
+// Улучшенная конфигурация PostgreSQL с обработкой ошибок
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  max: 5, // Ограничиваем соединения
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
-// Test database connection
+// Тестирование подключения к БД с повторными попытками
 async function testConnection() {
-  try {
-    const client = await pool.connect();
-    console.log('✅ Connected to PostgreSQL database');
-    client.release();
-    return true;
-  } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
-    return false;
+  let attempts = 0;
+  const maxAttempts = 3;
+  
+  while (attempts < maxAttempts) {
+    try {
+      const client = await pool.connect();
+      console.log('✅ Connected to PostgreSQL database');
+      client.release();
+      return true;
+    } catch (error) {
+      attempts++;
+      console.error(`❌ Database connection attempt ${attempts} failed:`, error.message);
+      
+      if (attempts < maxAttempts) {
+        console.log(`🔄 Retrying in 3 seconds...`);
+        await new Promise(resolve => setTimeout(resolve, 3000));
+      } else {
+        console.error('💥 All database connection attempts failed');
+        return false;
+      }
+    }
   }
 }
 
-// Initialize database
+// Инициализация базы данных
 async function initializeDatabase() {
   try {
     console.log('🔄 Checking database tables...');
@@ -58,48 +74,59 @@ async function initializeDatabase() {
 
     console.log('✅ Database tables ready');
   } catch (error) {
-    console.error('❌ Database error:', error.message);
+    console.error('❌ Database initialization error:', error.message);
+    // Не прерываем выполнение - приложение может работать без некоторых таблиц
   }
 }
 
-// Middleware
-// ============ CORS CONFIGURATION ============
-// В server.js замените блок CORS на этот:
+// Улучшенная CORS конфигурация
 app.use(cors({
   origin: function (origin, callback) {
-    const allowedOrigins = [
-      'https://makaka119911-oss.github.io',
-      'http://localhost:3000',
-      'https://makaka119911-oss.github.io/Tatiana'
-    ];
+    const allowedOrigins = process.env.ALLOWED_ORIGINS ? 
+      process.env.ALLOWED_ORIGINS.split(',') : 
+      ['https://makaka119911-oss.github.io', 'http://localhost:3000'];
     
-    // Разрешить запросы без origin (мобильные приложения и т.д.)
+    // Разрешить запросы без origin (мобильные приложения, curl и т.д.)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      console.log('Блокировано CORS:', origin);
+      console.log('🔒 CORS blocked for origin:', origin);
       callback(new Error('Not allowed by CORS'));
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept']
 }));
-app.use(express.json());
+
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+// Обработка OPTIONS запросов для CORS
+app.options('*', cors());
 
 // ============ HEALTHCHECK ENDPOINTS ============
-// Root endpoint for Railway healthcheck
+// Упрощенный health check для Railway
 app.get('/', (req, res) => {
   res.json({ 
     status: 'ok', 
     service: 'Tatiana Server',
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
+});
+
+// Health check endpoint для Railway
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
     timestamp: new Date().toISOString()
   });
 });
 
-// API healthcheck
+// API health check с проверкой БД
 app.get('/api/health', async (req, res) => {
   try {
     const dbConnected = await testConnection();
@@ -136,7 +163,7 @@ app.post('/api/register', async (req, res) => {
 
     console.log('✅ Registration saved:', registrationId);
 
-    // Send to Telegram
+    // Отправка в Telegram
     await sendToTelegram('registration', {
       lastName, firstName, age, phone, telegram, registrationId
     });
@@ -169,7 +196,7 @@ app.post('/api/test-result', async (req, res) => {
 
     console.log('✅ Test result saved:', registrationId);
 
-    // Send to Telegram
+    // Отправка в Telegram
     await sendToTelegram('test_result', {
       registrationId, level, score, testData
     });
@@ -210,8 +237,9 @@ app.get('/api/archive', async (req, res) => {
         t.score,
         t.created_at as tested_at
       FROM registrations r
-      JOIN test_results t ON r.registration_id = t.registration_id
+      LEFT JOIN test_results t ON r.registration_id = t.registration_id
       ORDER BY r.created_at DESC
+      LIMIT 1000
     `);
 
     const records = result.rows.map(row => ({
@@ -239,8 +267,8 @@ app.get('/api/archive', async (req, res) => {
 
 app.get('/api/debug/data', async (req, res) => {
   try {
-    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC');
-    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC');
+    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC LIMIT 10');
+    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC LIMIT 10');
     
     res.json({
       registrations: registrations.rows,
@@ -255,7 +283,7 @@ app.get('/api/debug/data', async (req, res) => {
   }
 });
 
-// Telegram function
+// Функция для отправки в Telegram
 async function sendToTelegram(type, data) {
   try {
     const botToken = process.env.TELEGRAM_BOT_TOKEN;
@@ -294,7 +322,8 @@ async function sendToTelegram(type, data) {
     if (response.ok) {
       console.log('✅ Message sent to Telegram');
     } else {
-      console.error('❌ Telegram error:', await response.text());
+      const errorText = await response.text();
+      console.error('❌ Telegram error:', errorText);
     }
 
   } catch (error) {
@@ -302,31 +331,52 @@ async function sendToTelegram(type, data) {
   }
 }
 
-// Error handling
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+  console.log('🛑 SIGTERM received, starting graceful shutdown');
+  await pool.end();
+  console.log('✅ Database connections closed');
+  process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+  console.log('🛑 SIGINT received, starting graceful shutdown');
+  await pool.end();
+  console.log('✅ Database connections closed');
+  process.exit(0);
+});
+
+// Обработка неперехваченных ошибок
 process.on('uncaughtException', (error) => {
   console.error('🚨 UNCAUGHT EXCEPTION:', error);
+  process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
+  process.exit(1);
 });
 
-// Start server
+// Запуск сервера
 async function startServer() {
   try {
     console.log('🔧 Initializing server...');
     
-    // Initialize database
+    // Инициализация базы данных
     await initializeDatabase();
     
-    // Test connection
-    await testConnection();
+    // Тестирование подключения
+    const dbConnected = await testConnection();
+    
+    if (!dbConnected) {
+      console.log('⚠️ Starting server without database connection');
+    }
 
-    app.listen(PORT, '0.0.0.0', () => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
       console.log('\n🎯 SERVER STARTED SUCCESSFULLY');
       console.log('========================================');
       console.log(`📍 Server: http://0.0.0.0:${PORT}`);
-      console.log(`🌐 Health: http://0.0.0.0:${PORT}/`);
+      console.log(`🌐 Health: http://0.0.0.0:${PORT}/health`);
       console.log(`🌐 API Health: http://0.0.0.0:${PORT}/api/health`);
       console.log(`📝 Register: http://0.0.0.0:${PORT}/api/register`);
       console.log(`📊 Test result: http://0.0.0.0:${PORT}/api/test-result`);
@@ -334,6 +384,11 @@ async function startServer() {
       console.log(`🔍 Debug: http://0.0.0.0:${PORT}/api/debug/data`);
       console.log('========================================\n');
     });
+
+    // Health check для Railway
+    server.keepAliveTimeout = 120000;
+    server.headersTimeout = 120000;
+
   } catch (error) {
     console.error('💥 FAILED TO START SERVER:', error);
     process.exit(1);
