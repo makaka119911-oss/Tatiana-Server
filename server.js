@@ -15,37 +15,6 @@ const pool = new Pool({
   ssl: { rejectUnauthorized: false }
 });
 
-// Health check endpoints
-app.get('/', (req, res) => {
-  res.json({ 
-    status: 'ok', 
-    message: 'Tatiana Server is running!',
-    timestamp: new Date().toISOString()
-  });
-});
-
-app.get('/health', async (req, res) => {
-  try {
-    const client = await pool.connect();
-    const result = await client.query('SELECT NOW() as current_time');
-    client.release();
-    
-    res.json({
-      status: 'ok',
-      database: 'connected',
-      current_time: result.rows[0].current_time,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      database: 'disconnected',
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 // Initialize database tables
 async function initDatabase() {
   try {
@@ -85,6 +54,37 @@ async function initDatabase() {
     console.error('❌ Database initialization error:', error);
   }
 }
+
+// Health check endpoints
+app.get('/', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Tatiana Server is running!',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/health', async (req, res) => {
+  try {
+    const client = await pool.connect();
+    const result = await client.query('SELECT NOW() as current_time');
+    client.release();
+    
+    res.json({
+      status: 'ok',
+      database: 'connected',
+      current_time: result.rows[0].current_time,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      database: 'disconnected',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
 
 // Registration endpoint
 app.post('/api/register', async (req, res) => {
@@ -230,20 +230,32 @@ app.post('/api/test-result', async (req, res) => {
   }
 });
 
-// Archive endpoint
+// Archive endpoint - FIXED VERSION
 app.get('/api/archive', async (req, res) => {
   try {
+    console.log('📊 Archive request received');
+    
     const authHeader = req.headers.authorization;
-    const token = authHeader?.replace('Bearer ', '');
+    if (!authHeader) {
+      return res.status(401).json({ 
+        success: false, 
+        error: 'Authorization header missing' 
+      });
+    }
+
+    const token = authHeader.replace('Bearer ', '');
     
     if (!token || token !== process.env.ARCHIVE_TOKEN) {
+      console.log('❌ Invalid archive token:', token);
       return res.status(401).json({ 
         success: false, 
         error: 'Неавторизованный доступ' 
       });
     }
 
-    // Get combined data
+    console.log('✅ Archive access authorized');
+
+    // Get combined data with better error handling
     const result = await pool.query(`
       SELECT 
         r.registration_id,
@@ -255,10 +267,11 @@ app.get('/api/archive', async (req, res) => {
         t.level,
         t.score
       FROM registrations r
-      LEFT JOIN test_results t ON r.registration_id = t.registration_id
-      WHERE t.registration_id IS NOT NULL
+      INNER JOIN test_results t ON r.registration_id = t.registration_id
       ORDER BY r.created_at DESC
     `);
+
+    console.log(`📊 Found ${result.rows.length} records in archive`);
 
     const records = result.rows.map(row => ({
       registrationId: row.registration_id,
@@ -279,7 +292,7 @@ app.get('/api/archive', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('❌ Archive error:', error);
+    console.error('❌ Archive endpoint error:', error);
     res.status(500).json({ 
       success: false, 
       error: 'Ошибка загрузки архива: ' + error.message 
@@ -306,6 +319,7 @@ async function startServer() {
       console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
       console.log(`📊 Database: ${process.env.DATABASE_URL ? 'Connected' : 'Not connected'}`);
       console.log(`🤖 Telegram: ${process.env.TELEGRAM_BOT_TOKEN ? 'Configured' : 'Not configured'}`);
+      console.log(`🔐 Archive Token: ${process.env.ARCHIVE_TOKEN ? 'Set' : 'Not set'}`);
       console.log('🎉 =================================\n');
     });
   } catch (error) {
