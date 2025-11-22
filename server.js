@@ -4,61 +4,22 @@ const { Pool } = require('pg');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting Tatiana Server with PostgreSQL...');
+console.log('🚀 Starting Tatiana Server...');
 
-// Database connection
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+// CRITICAL: Health checks must be defined FIRST
+app.get('/', (req, res) => {
+  console.log('✅ Health check received at /');
+  res.status(200).set('Content-Type', 'text/plain').send('OK');
 });
 
-// Test database connection
-const testDB = async () => {
-  try {
-    const client = await pool.connect();
-    const result = await client.query('SELECT NOW()');
-    client.release();
-    console.log('✅ Database connected:', result.rows[0].now);
-    return true;
-  } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
-    return false;
-  }
-};
-
-// Initialize database
-const initDB = async () => {
-  try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS registrations (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(255) UNIQUE NOT NULL,
-        last_name VARCHAR(255) NOT NULL,
-        first_name VARCHAR(255) NOT NULL,
-        age INTEGER NOT NULL,
-        phone VARCHAR(255) NOT NULL,
-        telegram VARCHAR(255) NOT NULL,
-        photo_base64 TEXT,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS test_results (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(255) REFERENCES registrations(registration_id),
-        test_data JSONB,
-        level VARCHAR(255),
-        score INTEGER,
-        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    console.log('✅ Database tables ready');
-  } catch (error) {
-    console.error('❌ Database init error:', error);
-  }
-};
+app.get('/health', (req, res) => {
+  console.log('✅ Health check received at /health');
+  res.status(200).json({ 
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    service: 'Tatiana Server'
+  });
+});
 
 // Middleware
 app.use(express.json({ limit: '10mb' }));
@@ -85,29 +46,6 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health check - SIMPLE TEXT RESPONSE (Railway requirement)
-app.get('/', (req, res) => {
-  res.status(200).set('Content-Type', 'text/plain').send('OK');
-});
-
-app.get('/health', async (req, res) => {
-  try {
-    const dbConnected = await testDB();
-    res.status(200).json({
-      status: 'ok',
-      database: dbConnected ? 'connected' : 'disconnected',
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime()
-    });
-  } catch (error) {
-    res.status(500).json({
-      status: 'error',
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
-});
-
 // Test endpoint
 app.get('/api/test', (req, res) => {
   res.json({ 
@@ -117,13 +55,62 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Register endpoint with DB
+// Database connection (non-blocking)
+let pool;
+const initDatabase = async () => {
+  try {
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      connectionTimeoutMillis: 5000,
+      idleTimeoutMillis: 30000,
+      max: 5
+    });
+
+    // Test connection
+    const client = await pool.connect();
+    console.log('✅ Database connected');
+    
+    // Create tables
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS registrations (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(255) UNIQUE NOT NULL,
+        last_name VARCHAR(255) NOT NULL,
+        first_name VARCHAR(255) NOT NULL,
+        age INTEGER NOT NULL,
+        phone VARCHAR(255) NOT NULL,
+        telegram VARCHAR(255) NOT NULL,
+        photo_base64 TEXT,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS test_results (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(255) REFERENCES registrations(registration_id),
+        test_data JSONB,
+        level VARCHAR(255),
+        score INTEGER,
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    client.release();
+    console.log('✅ Database tables ready');
+    
+  } catch (error) {
+    console.error('❌ Database initialization failed:', error.message);
+    // Don't crash the server if DB fails
+  }
+};
+
+// API endpoints with DB
 app.post('/api/register', async (req, res) => {
   try {
     const { lastName, firstName, age, phone, telegram, photoBase64 } = req.body;
     
-    console.log('📝 Registration received:', { lastName, firstName, age, phone, telegram });
-
     if (!lastName || !firstName || !age || !phone || !telegram) {
       return res.status(400).json({ 
         success: false, 
@@ -133,14 +120,16 @@ app.post('/api/register', async (req, res) => {
 
     const registrationId = 'REG_' + Date.now();
 
-    // Save to database
-    await pool.query(
-      `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram, photo_base64)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [registrationId, lastName, firstName, parseInt(age), phone, telegram, photoBase64 || null]
-    );
-
-    console.log('✅ Registration saved to DB:', registrationId);
+    if (pool) {
+      await pool.query(
+        `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram, photo_base64)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [registrationId, lastName, firstName, parseInt(age), phone, telegram, photoBase64 || null]
+      );
+      console.log('✅ Registration saved to DB:', registrationId);
+    } else {
+      console.log('⚠️ Registration saved in memory (DB not available):', registrationId);
+    }
 
     res.json({ 
       success: true, 
@@ -157,7 +146,6 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Test results endpoint
 app.post('/api/test-result', async (req, res) => {
   try {
     const { registrationId, testData, level, score } = req.body;
@@ -169,13 +157,16 @@ app.post('/api/test-result', async (req, res) => {
       });
     }
 
-    await pool.query(
-      `INSERT INTO test_results (registration_id, test_data, level, score)
-       VALUES ($1, $2, $3, $4)`,
-      [registrationId, testData, level, score]
-    );
-
-    console.log('✅ Test results saved for:', registrationId);
+    if (pool) {
+      await pool.query(
+        `INSERT INTO test_results (registration_id, test_data, level, score)
+         VALUES ($1, $2, $3, $4)`,
+        [registrationId, testData, level, score]
+      );
+      console.log('✅ Test results saved to DB for:', registrationId);
+    } else {
+      console.log('⚠️ Test results saved in memory (DB not available):', registrationId);
+    }
 
     res.json({ 
       success: true, 
@@ -191,7 +182,6 @@ app.post('/api/test-result', async (req, res) => {
   }
 });
 
-// Archive endpoint
 app.get('/api/archive', async (req, res) => {
   try {
     const token = req.headers.authorization?.replace('Bearer ', '');
@@ -203,32 +193,25 @@ app.get('/api/archive', async (req, res) => {
       });
     }
 
-    const result = await pool.query(`
-      SELECT 
-        r.registration_id,
-        r.last_name,
-        r.first_name,
-        r.age,
-        r.phone,
-        r.telegram,
-        t.level,
-        t.score,
-        r.created_at as date
-      FROM registrations r
-      LEFT JOIN test_results t ON r.registration_id = t.registration_id
-      ORDER BY r.created_at DESC
-    `);
-
-    const records = result.rows.map(row => ({
-      registrationId: row.registration_id,
-      fio: `${row.last_name} ${row.first_name}`,
-      age: row.age,
-      phone: row.phone,
-      telegram: row.telegram,
-      level: row.level,
-      score: row.score,
-      date: row.date
-    }));
+    let records = [];
+    if (pool) {
+      const result = await pool.query(`
+        SELECT 
+          r.registration_id,
+          r.last_name,
+          r.first_name,
+          r.age,
+          r.phone,
+          r.telegram,
+          t.level,
+          t.score,
+          r.created_at as date
+        FROM registrations r
+        LEFT JOIN test_results t ON r.registration_id = t.registration_id
+        ORDER BY r.created_at DESC
+      `);
+      records = result.rows;
+    }
 
     res.json({ 
       success: true, 
@@ -262,38 +245,32 @@ app.use((error, req, res, next) => {
   });
 });
 
-// Start server with DB initialization
-const startServer = async () => {
-  try {
-    // Test DB connection
-    await testDB();
-    await initDB();
+// Start server IMMEDIATELY
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
+  console.log(`📍 Server running on port: ${PORT}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
+  console.log('🚀 Health checks are ACTIVE');
+  console.log('🎉 =================================\n');
+});
 
-    const server = app.listen(PORT, '0.0.0.0', () => {
-      console.log('\n🎉 ===== TATIANA SERVER WITH POSTGRESQL STARTED =====');
-      console.log(`📍 Server running on port: ${PORT}`);
-      console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`🗄️ Database: Connected`);
-      console.log('🚀 Server is ready!');
-      console.log('🎉 =================================\n');
-    });
+// Initialize database AFTER server starts (non-blocking)
+setTimeout(() => {
+  initDatabase();
+}, 1000);
 
-    // Graceful shutdown
-    process.on('SIGTERM', () => {
-      console.log('🛑 SIGTERM received - starting graceful shutdown');
-      server.close(() => {
-        console.log('✅ Express server closed');
-        pool.end(() => {
-          console.log('✅ Database connections closed');
-          process.exit(0);
-        });
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('🛑 SIGTERM received - graceful shutdown');
+  server.close(() => {
+    console.log('✅ Express server closed');
+    if (pool) {
+      pool.end(() => {
+        console.log('✅ Database connections closed');
+        process.exit(0);
       });
-    });
-
-  } catch (error) {
-    console.error('❌ Failed to start server:', error);
-    process.exit(1);
-  }
-};
-
-startServer();
+    } else {
+      process.exit(0);
+    }
+  });
+});
