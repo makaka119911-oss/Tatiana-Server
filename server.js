@@ -10,7 +10,15 @@ app.use(express.urlencoded({ extended: true }));
 
 // CORS middleware
 app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
+  const allowedOrigins = process.env.ALLOWED_ORIGINS ? 
+    process.env.ALLOWED_ORIGINS.split(',') : 
+    ['https://makaka119911-oss.github.io', 'http://localhost:3000'];
+  
+  const origin = req.headers.origin;
+  if (allowedOrigins.includes(origin)) {
+    res.header('Access-Control-Allow-Origin', origin);
+  }
+  
   res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   
@@ -21,21 +29,20 @@ app.use((req, res, next) => {
   next();
 });
 
-// Health endpoints
+// Health check endpoint - ДОЛЖЕН БЫТЬ ПЕРВЫМ
 app.get('/', (req, res) => {
-  res.status(200).json({ 
-    status: 'OK', 
-    service: 'Tatiana Server',
-    timestamp: new Date().toISOString(),
-    message: 'Server is running!'
-  });
+  console.log('✅ Health check received');
+  res.status(200).set('Content-Type', 'text/plain').send('OK');
 });
 
+// Additional health endpoint
 app.get('/health', (req, res) => {
+  console.log('✅ Health endpoint called');
   res.status(200).json({ 
     status: 'ok',
     timestamp: new Date().toISOString(),
-    database: 'PostgreSQL is running'
+    service: 'Tatiana Server',
+    uptime: process.uptime()
   });
 });
 
@@ -48,7 +55,7 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Simple register endpoint (without DB for now)
+// Simple register endpoint
 app.post('/api/register', (req, res) => {
   try {
     const { lastName, firstName, age, phone, telegram } = req.body;
@@ -69,7 +76,7 @@ app.post('/api/register', (req, res) => {
     res.json({ 
       success: true, 
       registrationId,
-      message: 'Регистрация успешно завершена! (тестовый режим)' 
+      message: 'Регистрация успешно завершена!' 
     });
 
   } catch (error) {
@@ -81,7 +88,7 @@ app.post('/api/register', (req, res) => {
   }
 });
 
-// Archive endpoint (simple version)
+// Archive endpoint
 app.get('/api/archive', (req, res) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
   
@@ -118,22 +125,51 @@ app.use((error, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
   console.log(`📍 Server running on port: ${PORT}`);
   console.log(`🌐 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`📡 Health check: http://0.0.0.0:${PORT}/health`);
+  console.log(`📡 Health check: http://0.0.0.0:${PORT}/`);
+  console.log(`🏥 Health endpoint: http://0.0.0.0:${PORT}/health`);
   console.log('🚀 Server is ready and stable!');
   console.log('🎉 =================================\n');
 });
 
+// Server error handling
+server.on('error', (error) => {
+  console.error('🚨 Server error:', error);
+});
+
 // Handle graceful shutdown
 process.on('SIGTERM', () => {
-  console.log('🛑 SIGTERM received - graceful shutdown');
-  process.exit(0);
+  console.log('🛑 SIGTERM received - starting graceful shutdown');
+  server.close(() => {
+    console.log('✅ Express server closed');
+    process.exit(0);
+  });
+  
+  // Force close after 5 seconds
+  setTimeout(() => {
+    console.log('⚠️ Forcing shutdown after timeout');
+    process.exit(1);
+  }, 5000);
 });
 
 process.on('SIGINT', () => {
-  console.log('🛑 SIGINT received - graceful shutdown');
-  process.exit(0);
+  console.log('🛑 SIGINT received - starting graceful shutdown');
+  server.close(() => {
+    console.log('✅ Express server closed');
+    process.exit(0);
+  });
+});
+
+// Uncaught exception handling
+process.on('uncaughtException', (error) => {
+  console.error('🚨 UNCAUGHT EXCEPTION:', error);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
+  process.exit(1);
 });
