@@ -1,126 +1,118 @@
 const express = require('express');
-const cors = require('cors');
 const { Pool } = require('pg');
+const cors = require('cors');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-console.log('🚀 Starting Tatiana Server...');
+// Middleware
+app.use(cors({
+  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['https://makaka119911-oss.github.io'],
+  credentials: true
+}));
+app.use(express.json({ limit: '10mb' }));
 
 // PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
 });
 
-// Test database connection
-async function testConnection() {
+// Initialize database table
+async function initDatabase() {
   try {
     const client = await pool.connect();
-    console.log('✅ Connected to PostgreSQL database');
-    client.release();
-    return true;
-  } catch (error) {
-    console.error('❌ Database connection failed:', error.message);
-    return false;
-  }
-}
-
-// Initialize database
-async function initializeDatabase() {
-  try {
-    console.log('🔄 Checking database tables...');
     
-    await pool.query(`
+    // Create registrations table
+    await client.query(`
       CREATE TABLE IF NOT EXISTS registrations (
         id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(50) UNIQUE NOT NULL,
+        registration_id VARCHAR(100) UNIQUE NOT NULL,
         last_name VARCHAR(100) NOT NULL,
         first_name VARCHAR(100) NOT NULL,
         age INTEGER NOT NULL,
         phone VARCHAR(20) NOT NULL,
         telegram VARCHAR(100) NOT NULL,
+        photo_data TEXT,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    await pool.query(`
+    
+    // Create test_results table
+    await client.query(`
       CREATE TABLE IF NOT EXISTS test_results (
         id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(50) NOT NULL,
+        registration_id VARCHAR(100) REFERENCES registrations(registration_id),
         test_type VARCHAR(50) NOT NULL,
-        libido_level VARCHAR(100) NOT NULL,
+        level VARCHAR(50) NOT NULL,
         score INTEGER NOT NULL,
         test_data JSONB,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    console.log('✅ Database tables ready');
+    
+    console.log('✅ Database tables initialized');
+    client.release();
   } catch (error) {
-    console.error('❌ Database error:', error.message);
+    console.error('❌ Database initialization error:', error);
   }
 }
 
-// Middleware
-app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : ['https://makaka119911-oss.github.io'],
-  credentials: true
-}));
-
-app.use(express.json());
-
-// ============ HEALTHCHECK ENDPOINTS ============
-// Root endpoint for Railway healthcheck
+// Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ 
+  res.status(200).json({ 
     status: 'ok', 
     service: 'Tatiana Server',
     timestamp: new Date().toISOString()
   });
 });
 
-// API healthcheck
-app.get('/api/health', async (req, res) => {
-  try {
-    const dbConnected = await testConnection();
-    res.json({ 
-      status: 'ok', 
-      database: dbConnected ? 'connected' : 'disconnected',
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    res.status(500).json({ 
-      status: 'error', 
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
-  }
+app.get('/health', (req, res) => {
+  res.status(200).json({ 
+    status: 'ok',
+    database: 'connected',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// ============ API ROUTES ============
+// Registration endpoint
 app.post('/api/register', async (req, res) => {
   try {
-    const { lastName, firstName, age, phone, telegram } = req.body;
+    console.log('📝 Registration request received');
     
+    const { lastName, firstName, age, phone, telegram, photoData } = req.body;
+    
+    // Validation
     if (!lastName || !firstName || !age || !phone || !telegram) {
-      return res.status(400).json({ success: false, error: 'Все поля обязательны' });
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Все поля обязательны для заполнения' 
+      });
     }
 
-    const registrationId = 'REG_' + Date.now();
+    const registrationId = 'REG_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     
-    await pool.query(
-      `INSERT INTO registrations (registration_id, last_name, first_name, age, phone, telegram) 
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [registrationId, lastName, firstName, parseInt(age), phone, telegram]
+    // Save to database
+    const result = await pool.query(
+      `INSERT INTO registrations 
+       (registration_id, last_name, first_name, age, phone, telegram, photo_data) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7) 
+       RETURNING registration_id`,
+      [registrationId, lastName, firstName, parseInt(age), phone, telegram, photoData || null]
     );
 
-    console.log('✅ Registration saved:', registrationId);
+    console.log('✅ Registration saved to database:', registrationId);
 
     // Send to Telegram
-    await sendToTelegram('registration', {
-      lastName, firstName, age, phone, telegram, registrationId
-    });
+    try {
+      await sendToTelegram({
+        type: 'registration',
+        data: { lastName, firstName, age, phone, telegram, registrationId }
+      });
+    } catch (telegramError) {
+      console.error('⚠️ Telegram error:', telegramError);
+      // Don't fail the request if Telegram fails
+    }
 
     res.json({ 
       success: true, 
@@ -130,30 +122,66 @@ app.post('/api/register', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Registration error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      error: 'Внутренняя ошибка сервера: ' + error.message 
+    });
   }
 });
 
+// Test result endpoint
 app.post('/api/test-result', async (req, res) => {
   try {
+    console.log('🧪 Test result received');
+    
     const { registrationId, level, score, testData } = req.body;
     
-    if (!registrationId || !level) {
-      return res.status(400).json({ success: false, error: 'Registration ID и уровень обязательны' });
+    if (!registrationId || !level || !score) {
+      return res.status(400).json({ 
+        success: false, 
+        error: 'Отсутствуют обязательные данные' 
+      });
     }
 
-    await pool.query(
-      `INSERT INTO test_results (registration_id, test_type, libido_level, score, test_data) 
-       VALUES ($1, $2, $3, $4, $5)`,
-      [registrationId, testData?.test_type || 'regular', level, score || 0, testData]
+    // Verify registration exists
+    const regResult = await pool.query(
+      'SELECT * FROM registrations WHERE registration_id = $1',
+      [registrationId]
     );
 
-    console.log('✅ Test result saved:', registrationId);
+    if (regResult.rows.length === 0) {
+      return res.status(404).json({ 
+        success: false, 
+        error: 'Регистрация не найдена' 
+      });
+    }
+
+    // Save test result
+    await pool.query(
+      `INSERT INTO test_results 
+       (registration_id, test_type, level, score, test_data) 
+       VALUES ($1, $2, $3, $4, $5)`,
+      [registrationId, testData?.test_type || 'regular', level, parseInt(score), testData || {}]
+    );
+
+    console.log('✅ Test result saved for:', registrationId);
 
     // Send to Telegram
-    await sendToTelegram('test_result', {
-      registrationId, level, score, testData
-    });
+    try {
+      const registration = regResult.rows[0];
+      await sendToTelegram({
+        type: 'test_result',
+        data: { 
+          registrationId,
+          user: `${registration.first_name} ${registration.last_name}`,
+          level, 
+          score,
+          testData 
+        }
+      });
+    } catch (telegramError) {
+      console.error('⚠️ Telegram error:', telegramError);
+    }
 
     res.json({ 
       success: true, 
@@ -162,124 +190,198 @@ app.post('/api/test-result', async (req, res) => {
 
   } catch (error) {
     console.error('❌ Test result error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      error: 'Ошибка сохранения результатов: ' + error.message 
+    });
   }
 });
 
+// Archive endpoint with authentication
 app.get('/api/archive', async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      return res.status(401).json({ success: false, error: 'Требуется авторизация' });
+    const token = authHeader?.replace('Bearer ', '');
+    
+    if (!token || token !== process.env.ARCHIVE_TOKEN) {
+      return res.status(401).json({ 
+        success: false, 
+        error: 'Неавторизованный доступ' 
+      });
     }
 
-    const token = authHeader.replace('Bearer ', '');
-    if (token !== process.env.ARCHIVE_TOKEN) {
-      return res.status(401).json({ success: false, error: 'Неверный токен доступа' });
-    }
-
+    // Get combined data from both tables
     const result = await pool.query(`
       SELECT 
         r.registration_id,
-        r.first_name,
-        r.last_name,
+        r.last_name || ' ' || r.first_name as fio,
         r.age,
         r.phone,
         r.telegram,
-        r.created_at as registered_at,
-        t.libido_level,
+        r.photo_data,
+        r.created_at as date,
+        t.level,
         t.score,
-        t.created_at as tested_at
+        t.test_data
       FROM registrations r
-      JOIN test_results t ON r.registration_id = t.registration_id
+      LEFT JOIN test_results t ON r.registration_id = t.registration_id
+      WHERE t.registration_id IS NOT NULL
       ORDER BY r.created_at DESC
     `);
 
     const records = result.rows.map(row => ({
-      fio: `${row.last_name} ${row.first_name}`,
+      registrationId: row.registration_id,
+      fio: row.fio,
       age: row.age,
       phone: row.phone,
       telegram: row.telegram,
-      level: row.libido_level,
+      level: row.level,
       score: row.score,
-      date: row.tested_at || row.registered_at,
-      registrationId: row.registration_id
+      date: row.date,
+      testData: row.test_data
     }));
 
-    res.json({ 
-      success: true, 
-      records, 
-      count: records.length 
+    console.log('📊 Archive data sent:', records.length, 'records');
+
+    res.json({
+      success: true,
+      records,
+      count: records.length,
+      timestamp: new Date().toISOString()
     });
 
   } catch (error) {
     console.error('❌ Archive error:', error);
-    res.status(500).json({ success: false, error: error.message });
+    res.status(500).json({ 
+      success: false, 
+      error: 'Ошибка загрузки архива: ' + error.message 
+    });
   }
 });
 
-app.get('/api/debug/data', async (req, res) => {
+// Search archive by name
+app.get('/api/archive/search/:query', async (req, res) => {
   try {
-    const registrations = await pool.query('SELECT * FROM registrations ORDER BY created_at DESC');
-    const testResults = await pool.query('SELECT * FROM test_results ORDER BY created_at DESC');
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.replace('Bearer ', '');
     
+    if (!token || token !== process.env.ARCHIVE_TOKEN) {
+      return res.status(401).json({ 
+        success: false, 
+        error: 'Неавторизованный доступ' 
+      });
+    }
+
+    const query = req.params.query.toLowerCase();
+    
+    const result = await pool.query(`
+      SELECT 
+        r.registration_id,
+        r.last_name || ' ' || r.first_name as fio,
+        r.age,
+        r.phone,
+        r.telegram,
+        r.created_at as date,
+        t.level,
+        t.score
+      FROM registrations r
+      LEFT JOIN test_results t ON r.registration_id = t.registration_id
+      WHERE (LOWER(r.last_name) LIKE $1 OR LOWER(r.first_name) LIKE $1)
+        AND t.registration_id IS NOT NULL
+      ORDER BY r.created_at DESC
+    `, [`%${query}%`]);
+
+    const records = result.rows.map(row => ({
+      registrationId: row.registration_id,
+      fio: row.fio,
+      age: row.age,
+      phone: row.phone,
+      telegram: row.telegram,
+      level: row.level,
+      score: row.score,
+      date: row.date
+    }));
+
     res.json({
-      registrations: registrations.rows,
-      testResults: testResults.rows,
-      counts: {
-        registrations: registrations.rows.length,
-        testResults: testResults.rows.length
-      }
+      success: true,
+      records,
+      count: records.length
     });
+
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('❌ Search error:', error);
+    res.status(500).json({ 
+      success: false, 
+      error: 'Ошибка поиска: ' + error.message 
+    });
   }
 });
 
-// Telegram function
-async function sendToTelegram(type, data) {
+// Telegram notification function
+async function sendToTelegram({ type, data }) {
+  if (!process.env.TELEGRAM_BOT_TOKEN || !process.env.TELEGRAM_CHAT_ID) {
+    console.log('⚠️ Telegram credentials not set');
+    return;
+  }
+
+  let message = '';
+
+  if (type === 'registration') {
+    message = `🌟 *НОВАЯ РЕГИСТРАЦИЯ* 🌟\n\n` +
+      `👤 *Контактная информация:*\n` +
+      `   └ *Фамилия:* ${data.lastName}\n` +
+      `   └ *Имя:* ${data.firstName}\n` +
+      `   └ *Возраст:* ${data.age}\n` +
+      `   └ *Телефон:* ${data.phone}\n` +
+      `   └ *Telegram:* ${data.telegram}\n` +
+      `   └ *ID:* ${data.registrationId}\n` +
+      `\n⏰ *Дата регистрации:* ${new Date().toLocaleString('ru-RU')}`;
+  } else if (type === 'test_result') {
+    message = `📊 *НОВЫЙ РЕЗУЛЬТАТ ТЕСТА* 📊\n\n` +
+      `👤 *Пользователь:* ${data.user}\n` +
+      `📱 *ID:* ${data.registrationId}\n` +
+      `📈 *Уровень либидо:* ${data.level}\n` +
+      `⭐ *Баллы:* ${data.score}\n` +
+      `\n⏰ *Дата теста:* ${new Date().toLocaleString('ru-RU')}`;
+  }
+
+  const url = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOKEN}/sendMessage`;
+  
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      chat_id: process.env.TELEGRAM_CHAT_ID,
+      text: message,
+      parse_mode: 'Markdown'
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Telegram API error: ${response.status}`);
+  }
+
+  console.log('✅ Notification sent to Telegram');
+}
+
+// Initialize database and start server
+async function startServer() {
   try {
-    const botToken = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID;
+    await initDatabase();
     
-    if (!botToken || !chatId) {
-      console.log('⚠️ Telegram credentials not found');
-      return;
-    }
-
-    let message = '';
-    
-    if (type === 'registration') {
-      message = `🌟 *НОВАЯ РЕГИСТРАЦИЯ* 🌟\n\n` +
-                `👤 *${data.lastName} ${data.firstName}*\n` +
-                `📞 ${data.phone} | 👤 ${data.age} лет\n` +
-                `📱 ${data.telegram}\n` +
-                `🆔 ${data.registrationId}`;
-    } else if (type === 'test_result') {
-      message = `📊 *РЕЗУЛЬТАТ ТЕСТА* 📊\n\n` +
-                `🆔 ${data.registrationId}\n` +
-                `📈 Уровень: ${data.level}\n` +
-                `⭐ Баллы: ${data.score || 'N/A'}`;
-    }
-
-    const response = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: message,
-        parse_mode: 'Markdown'
-      })
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
+      console.log(`📍 Port: ${PORT}`);
+      console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
+      console.log(`📊 Database: ${process.env.DATABASE_URL ? 'Connected' : 'Not connected'}`);
+      console.log(`🤖 Telegram: ${process.env.TELEGRAM_BOT_TOKEN ? 'Configured' : 'Not configured'}`);
+      console.log('🎉 =================================\n');
     });
-
-    if (response.ok) {
-      console.log('✅ Message sent to Telegram');
-    } else {
-      console.error('❌ Telegram error:', await response.text());
-    }
-
   } catch (error) {
-    console.error('❌ Telegram error:', error.message);
+    console.error('🚨 Failed to start server:', error);
+    process.exit(1);
   }
 }
 
@@ -292,33 +394,5 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
 });
 
-// Start server
-async function startServer() {
-  try {
-    console.log('🔧 Initializing server...');
-    
-    // Initialize database
-    await initializeDatabase();
-    
-    // Test connection
-    await testConnection();
-
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log('\n🎯 SERVER STARTED SUCCESSFULLY');
-      console.log('========================================');
-      console.log(`📍 Server: http://0.0.0.0:${PORT}`);
-      console.log(`🌐 Health: http://0.0.0.0:${PORT}/`);
-      console.log(`🌐 API Health: http://0.0.0.0:${PORT}/api/health`);
-      console.log(`📝 Register: http://0.0.0.0:${PORT}/api/register`);
-      console.log(`📊 Test result: http://0.0.0.0:${PORT}/api/test-result`);
-      console.log(`📁 Archive: http://0.0.0.0:${PORT}/api/archive`);
-      console.log(`🔍 Debug: http://0.0.0.0:${PORT}/api/debug/data`);
-      console.log('========================================\n');
-    });
-  } catch (error) {
-    console.error('💥 FAILED TO START SERVER:', error);
-    process.exit(1);
-  }
-}
-
+// Start the server
 startServer();
