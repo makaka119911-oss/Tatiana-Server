@@ -7,9 +7,9 @@
   "deploy": {
     "numReplicas": 1,
     "startCommand": "npm start",
-    "healthcheckPath": "/api/health",
-    "healthcheckTimeout": 100
-  },
+        "healthcheckPath": "/",
+    "healthcheckTimeout": 60,
+    "healthcheckInterval": 30
   "plugins": [
     "postgres"
   ]
