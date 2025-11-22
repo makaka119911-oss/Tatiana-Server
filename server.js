@@ -20,9 +20,13 @@ async function initDatabase() {
   try {
     const client = await pool.connect();
     
+    // Drop and recreate tables to fix structure
+    await client.query('DROP TABLE IF EXISTS test_results');
+    await client.query('DROP TABLE IF EXISTS registrations');
+    
     // Create registrations table
     await client.query(`
-      CREATE TABLE IF NOT EXISTS registrations (
+      CREATE TABLE registrations (
         id SERIAL PRIMARY KEY,
         registration_id VARCHAR(100) UNIQUE NOT NULL,
         last_name VARCHAR(100) NOT NULL,
@@ -35,9 +39,9 @@ async function initDatabase() {
       )
     `);
     
-    // Create test_results table
+    // Create test_results table with correct column names
     await client.query(`
-      CREATE TABLE IF NOT EXISTS test_results (
+      CREATE TABLE test_results (
         id SERIAL PRIMARY KEY,
         registration_id VARCHAR(100) NOT NULL,
         test_type VARCHAR(50) NOT NULL,
@@ -48,7 +52,7 @@ async function initDatabase() {
       )
     `);
     
-    console.log('✅ Database tables initialized');
+    console.log('✅ Database tables recreated with correct structure');
     client.release();
   } catch (error) {
     console.error('❌ Database initialization error:', error);
@@ -230,7 +234,7 @@ app.post('/api/test-result', async (req, res) => {
   }
 });
 
-// Archive endpoint - FIXED VERSION
+// Archive endpoint - FIXED with correct column names
 app.get('/api/archive', async (req, res) => {
   try {
     console.log('📊 Archive request received');
@@ -246,7 +250,7 @@ app.get('/api/archive', async (req, res) => {
     const token = authHeader.replace('Bearer ', '');
     
     if (!token || token !== process.env.ARCHIVE_TOKEN) {
-      console.log('❌ Invalid archive token:', token);
+      console.log('❌ Invalid archive token');
       return res.status(401).json({ 
         success: false, 
         error: 'Неавторизованный доступ' 
@@ -255,7 +259,7 @@ app.get('/api/archive', async (req, res) => {
 
     console.log('✅ Archive access authorized');
 
-    // Get combined data with better error handling
+    // Get combined data with correct column names
     const result = await pool.query(`
       SELECT 
         r.registration_id,
@@ -297,6 +301,47 @@ app.get('/api/archive', async (req, res) => {
       success: false, 
       error: 'Ошибка загрузки архива: ' + error.message 
     });
+  }
+});
+
+// Debug endpoint to check database state
+app.get('/api/debug', async (req, res) => {
+  try {
+    // Check registrations
+    const regResult = await pool.query('SELECT COUNT(*) as reg_count FROM registrations');
+    // Check test results
+    const testResult = await pool.query('SELECT COUNT(*) as test_count FROM test_results');
+    // Check joined data
+    const joinResult = await pool.query(`
+      SELECT COUNT(*) as join_count 
+      FROM registrations r 
+      INNER JOIN test_results t ON r.registration_id = t.registration_id
+    `);
+
+    // Check table structure
+    const regColumns = await pool.query(`
+      SELECT column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name = 'registrations'
+    `);
+
+    const testColumns = await pool.query(`
+      SELECT column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name = 'test_results'
+    `);
+
+    res.json({
+      registrations: regResult.rows[0].reg_count,
+      test_results: testResult.rows[0].test_count,
+      joined_records: joinResult.rows[0].join_count,
+      registrations_columns: regColumns.rows,
+      test_results_columns: testColumns.rows,
+      database_url: process.env.DATABASE_URL ? 'Set' : 'Not set',
+      archive_token: process.env.ARCHIVE_TOKEN ? 'Set' : 'Not set'
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
