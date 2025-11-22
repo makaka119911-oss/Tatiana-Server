@@ -64,6 +64,7 @@ async function initializeDatabase() {
 
 // Middleware
 // ============ CORS CONFIGURATION ============
+// В server.js замените блок CORS на этот:
 app.use(cors({
   origin: function (origin, callback) {
     const allowedOrigins = [
