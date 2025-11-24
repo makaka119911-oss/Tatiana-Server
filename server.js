@@ -7,57 +7,13 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '50mb' })); // Увеличиваем лимит для фото
 
 // PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
-
-// Initialize database tables
-async function initDatabase() {
-  try {
-    const client = await pool.connect();
-    
-    // Drop and recreate tables to fix structure
-    await client.query('DROP TABLE IF EXISTS test_results');
-    await client.query('DROP TABLE IF EXISTS registrations');
-    
-    // Create registrations table
-    await client.query(`
-      CREATE TABLE registrations (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(100) UNIQUE NOT NULL,
-        last_name VARCHAR(100) NOT NULL,
-        first_name VARCHAR(100) NOT NULL,
-        age INTEGER NOT NULL,
-        phone VARCHAR(50) NOT NULL,
-        telegram VARCHAR(100) NOT NULL,
-        photo_data TEXT,
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    // Create test_results table with correct column names
-    await client.query(`
-      CREATE TABLE test_results (
-        id SERIAL PRIMARY KEY,
-        registration_id VARCHAR(100) NOT NULL,
-        test_type VARCHAR(50) NOT NULL,
-        level VARCHAR(50) NOT NULL,
-        score INTEGER NOT NULL,
-        test_data JSONB,
-        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    
-    console.log('✅ Database tables recreated with correct structure');
-    client.release();
-  } catch (error) {
-    console.error('❌ Database initialization error:', error);
-  }
-}
 
 // Health check endpoints
 app.get('/', (req, res) => {
@@ -90,10 +46,10 @@ app.get('/health', async (req, res) => {
   }
 });
 
-// Registration endpoint
+// Registration endpoint with photo support
 app.post('/api/register', async (req, res) => {
   try {
-    const { lastName, firstName, age, phone, telegram } = req.body;
+    const { lastName, firstName, age, phone, telegram, photo_data } = req.body;
     
     // Validation
     if (!lastName || !firstName || !age || !phone || !telegram) {
@@ -105,17 +61,17 @@ app.post('/api/register', async (req, res) => {
 
     const registrationId = 'REG_' + Date.now();
     
-    // Save to database
+    // Save to database with photo
     await pool.query(
       `INSERT INTO registrations 
-       (registration_id, last_name, first_name, age, phone, telegram) 
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [registrationId, lastName, firstName, parseInt(age), phone, telegram]
+       (registration_id, last_name, first_name, age, phone, telegram, photo_data) 
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [registrationId, lastName, firstName, parseInt(age), phone, telegram, photo_data]
     );
 
-    console.log('✅ Registration saved:', registrationId);
+    console.log('✅ Registration saved with photo:', registrationId);
 
-    // Send to Telegram
+    // Send to Telegram (без фото в телеграм для экономии)
     if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
       try {
         const message = `🌟 *НОВАЯ РЕГИСТРАЦИЯ* 🌟\n\n` +
@@ -123,6 +79,7 @@ app.post('/api/register', async (req, res) => {
           `📅 *Возраст:* ${age}\n` +
           `📞 *Телефон:* ${phone}\n` +
           `✈️ *Telegram:* ${telegram}\n` +
+          `🖼️ *Фото:* ${photo_data ? 'Да' : 'Нет'}\n` +
           `🆔 *ID:* ${registrationId}\n` +
           `\n⏰ *Дата:* ${new Date().toLocaleString('ru-RU')}`;
 
@@ -234,7 +191,7 @@ app.post('/api/test-result', async (req, res) => {
   }
 });
 
-// Archive endpoint - FIXED with correct column names
+// Archive endpoint - возвращает данные с фото
 app.get('/api/archive', async (req, res) => {
   try {
     console.log('📊 Archive request received');
@@ -259,7 +216,7 @@ app.get('/api/archive', async (req, res) => {
 
     console.log('✅ Archive access authorized');
 
-    // Get combined data with correct column names
+    // Get combined data with photo
     const result = await pool.query(`
       SELECT 
         r.registration_id,
@@ -267,6 +224,7 @@ app.get('/api/archive', async (req, res) => {
         r.age,
         r.phone,
         r.telegram,
+        r.photo_data,
         r.created_at as date,
         t.level,
         t.score
@@ -283,6 +241,7 @@ app.get('/api/archive', async (req, res) => {
       age: row.age,
       phone: row.phone,
       telegram: row.telegram,
+      photo_data: row.photo_data, // добавляем фото
       level: row.level,
       score: row.score,
       date: row.date
@@ -304,39 +263,15 @@ app.get('/api/archive', async (req, res) => {
   }
 });
 
-// Debug endpoint to check database state
+// Debug endpoint
 app.get('/api/debug', async (req, res) => {
   try {
-    // Check registrations
     const regResult = await pool.query('SELECT COUNT(*) as reg_count FROM registrations');
-    // Check test results
     const testResult = await pool.query('SELECT COUNT(*) as test_count FROM test_results');
-    // Check joined data
-    const joinResult = await pool.query(`
-      SELECT COUNT(*) as join_count 
-      FROM registrations r 
-      INNER JOIN test_results t ON r.registration_id = t.registration_id
-    `);
-
-    // Check table structure
-    const regColumns = await pool.query(`
-      SELECT column_name, data_type 
-      FROM information_schema.columns 
-      WHERE table_name = 'registrations'
-    `);
-
-    const testColumns = await pool.query(`
-      SELECT column_name, data_type 
-      FROM information_schema.columns 
-      WHERE table_name = 'test_results'
-    `);
-
+    
     res.json({
       registrations: regResult.rows[0].reg_count,
       test_results: testResult.rows[0].test_count,
-      joined_records: joinResult.rows[0].join_count,
-      registrations_columns: regColumns.rows,
-      test_results_columns: testColumns.rows,
       database_url: process.env.DATABASE_URL ? 'Set' : 'Not set',
       archive_token: process.env.ARCHIVE_TOKEN ? 'Set' : 'Not set'
     });
@@ -353,25 +288,13 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Initialize and start server
-async function startServer() {
-  try {
-    await initDatabase();
-    
-    app.listen(PORT, '0.0.0.0', () => {
-      console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
-      console.log(`📍 Port: ${PORT}`);
-      console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
-      console.log(`📊 Database: ${process.env.DATABASE_URL ? 'Connected' : 'Not connected'}`);
-      console.log(`🤖 Telegram: ${process.env.TELEGRAM_BOT_TOKEN ? 'Configured' : 'Not configured'}`);
-      console.log(`🔐 Archive Token: ${process.env.ARCHIVE_TOKEN ? 'Set' : 'Not set'}`);
-      console.log('🎉 =================================\n');
-    });
-  } catch (error) {
-    console.error('🚨 Failed to start server:', error);
-    process.exit(1);
-  }
-}
+// Start server
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
+  console.log(`📍 Port: ${PORT}`);
+  console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
+  console.log('🎉 =================================\n');
+});
 
 // Error handling
 process.on('uncaughtException', (error) => {
@@ -381,6 +304,3 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
 });
-
-// Start the server
-startServer();
