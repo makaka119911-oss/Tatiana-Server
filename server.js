@@ -47,6 +47,20 @@ async function initDatabase() {
         created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Проверяем и добавляем колонку photo_data если нужно
+    const checkResult = await client.query(`
+      SELECT column_name 
+      FROM information_schema.columns 
+      WHERE table_name = 'registrations' AND column_name = 'photo_data'
+    `);
+    
+    if (checkResult.rows.length === 0) {
+      await client.query('ALTER TABLE registrations ADD COLUMN photo_data TEXT');
+      console.log('✅ Колонка photo_data добавлена в таблицу registrations');
+    } else {
+      console.log('✅ Колонка photo_data уже существует');
+    }
     
     console.log('✅ Database tables checked/created');
     client.release();
@@ -91,6 +105,15 @@ app.post('/api/register', async (req, res) => {
   try {
     const { lastName, firstName, age, phone, telegram, photo_data } = req.body;
     
+    console.log('📝 Получены данные регистрации:', {
+      lastName,
+      firstName,
+      age,
+      phone,
+      telegram,
+      photo_data: photo_data ? `base64 длиной ${photo_data.length} символов` : 'отсутствует'
+    });
+
     // Validation
     if (!lastName || !firstName || !age || !phone || !telegram) {
       return res.status(400).json({ 
