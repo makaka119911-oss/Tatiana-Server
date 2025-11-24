@@ -7,13 +7,53 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json({ limit: '50mb' })); // Увеличиваем лимит для фото
+app.use(express.json({ limit: '50mb' }));
 
 // PostgreSQL connection
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
+
+// Функция для инициализации базы данных
+async function initDatabase() {
+  try {
+    const client = await pool.connect();
+    
+    // Создаем таблицу registrations если не существует
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS registrations (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(100) UNIQUE NOT NULL,
+        last_name VARCHAR(100) NOT NULL,
+        first_name VARCHAR(100) NOT NULL,
+        age INTEGER NOT NULL,
+        phone VARCHAR(50) NOT NULL,
+        telegram VARCHAR(100) NOT NULL,
+        photo_data TEXT,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Создаем таблицу test_results если не существует
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS test_results (
+        id SERIAL PRIMARY KEY,
+        registration_id VARCHAR(100) NOT NULL,
+        test_type VARCHAR(50) NOT NULL,
+        level VARCHAR(50) NOT NULL,
+        score INTEGER NOT NULL,
+        test_data JSONB,
+        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    console.log('✅ Database tables checked/created');
+    client.release();
+  } catch (error) {
+    console.error('❌ Database initialization error:', error);
+  }
+}
 
 // Health check endpoints
 app.get('/', (req, res) => {
@@ -71,7 +111,7 @@ app.post('/api/register', async (req, res) => {
 
     console.log('✅ Registration saved with photo:', registrationId);
 
-    // Send to Telegram (без фото в телеграм для экономии)
+    // Send to Telegram
     if (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) {
       try {
         const message = `🌟 *НОВАЯ РЕГИСТРАЦИЯ* 🌟\n\n` +
@@ -241,7 +281,7 @@ app.get('/api/archive', async (req, res) => {
       age: row.age,
       phone: row.phone,
       telegram: row.telegram,
-      photo_data: row.photo_data, // добавляем фото
+      photo_data: row.photo_data,
       level: row.level,
       score: row.score,
       date: row.date
@@ -268,10 +308,16 @@ app.get('/api/debug', async (req, res) => {
   try {
     const regResult = await pool.query('SELECT COUNT(*) as reg_count FROM registrations');
     const testResult = await pool.query('SELECT COUNT(*) as test_count FROM test_results');
+    const columnsResult = await pool.query(`
+      SELECT column_name, data_type 
+      FROM information_schema.columns 
+      WHERE table_name = 'registrations'
+    `);
     
     res.json({
       registrations: regResult.rows[0].reg_count,
       test_results: testResult.rows[0].test_count,
+      registrations_columns: columnsResult.rows,
       database_url: process.env.DATABASE_URL ? 'Set' : 'Not set',
       archive_token: process.env.ARCHIVE_TOKEN ? 'Set' : 'Not set'
     });
@@ -288,13 +334,25 @@ app.get('/api/test', (req, res) => {
   });
 });
 
-// Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
-  console.log(`📍 Port: ${PORT}`);
-  console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
-  console.log('🎉 =================================\n');
-});
+// Initialize and start server
+async function startServer() {
+  try {
+    await initDatabase();
+    
+    app.listen(PORT, '0.0.0.0', () => {
+      console.log('\n🎉 ===== TATIANA SERVER STARTED =====');
+      console.log(`📍 Port: ${PORT}`);
+      console.log(`🌐 Environment: ${process.env.NODE_ENV}`);
+      console.log(`📊 Database: ${process.env.DATABASE_URL ? 'Connected' : 'Not connected'}`);
+      console.log(`🤖 Telegram: ${process.env.TELEGRAM_BOT_TOKEN ? 'Configured' : 'Not configured'}`);
+      console.log(`🔐 Archive Token: ${process.env.ARCHIVE_TOKEN ? 'Set' : 'Not set'}`);
+      console.log('🎉 =================================\n');
+    });
+  } catch (error) {
+    console.error('🚨 Failed to start server:', error);
+    process.exit(1);
+  }
+}
 
 // Error handling
 process.on('uncaughtException', (error) => {
@@ -304,3 +362,6 @@ process.on('uncaughtException', (error) => {
 process.on('unhandledRejection', (reason, promise) => {
   console.error('🚨 UNHANDLED REJECTION at:', promise, 'reason:', reason);
 });
+
+// Start the server
+startServer();
